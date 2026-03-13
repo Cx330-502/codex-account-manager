@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { resolveCodexHome } from "./auth";
 import { CodexAccountsController } from "./controller";
 import { CodexAccountsSidebarProvider } from "./sidebar";
+import { CodexAccountsStatusBarController } from "./statusBar";
 import { CodexAccountStore } from "./store";
 import { UsageService } from "./usage";
 
@@ -24,6 +25,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     controller,
   );
   context.subscriptions.push(sidebarProvider);
+  const statusBar = new CodexAccountsStatusBarController(controller);
+  context.subscriptions.push(statusBar);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -89,9 +92,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await controller.refreshUsage(item);
       },
     ),
+    vscode.commands.registerCommand("codexAccounts.statusBarMenu", async () => {
+      await statusBar.openMenu();
+    }),
+    vscode.commands.registerCommand("codexAccounts.openSidebar", async () => {
+      await vscode.commands.executeCommand("workbench.view.explorer");
+      await vscode.commands.executeCommand("codexAccountsView.focus");
+    }),
   );
 
   await controller.initialize();
+  statusBar.render(controller.getState());
 }
 
 export function deactivate(): void {
