@@ -59,14 +59,14 @@ jobs:
 
       - name: Resolve tag from package.json
         id: version
-        run: echo "tag=v$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+        run: echo "tag=v$(node -e 'process.stdout.write(require(\"./package.json\").version)')" >> "$GITHUB_OUTPUT"
 
       - name: Check whether package version changed
         id: changed
         env:
           BEFORE_SHA: ${{ github.event.before }}
         run: |
-          CURRENT_VERSION="$(node -p \"require('./package.json').version\")"
+          CURRENT_VERSION="$(node -e 'process.stdout.write(require("./package.json").version)')"
           PREV_VERSION=""
           if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE_SHA:package.json" 2>/dev/null; then
             PREV_VERSION="$(git show "$BEFORE_SHA:package.json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).version||''));")"
