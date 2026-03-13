@@ -1,0 +1,99 @@
+import * as vscode from "vscode";
+
+import { resolveCodexHome } from "./auth";
+import { CodexAccountsController } from "./controller";
+import { CodexAccountsSidebarProvider } from "./sidebar";
+import { CodexAccountStore } from "./store";
+import { UsageService } from "./usage";
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const codexHome = resolveCodexHome(
+    vscode.workspace
+      .getConfiguration("codexAccounts")
+      .get<string>("codexHome", ""),
+  );
+
+  const controller = new CodexAccountsController(
+    new CodexAccountStore(codexHome),
+    new UsageService(),
+  );
+  context.subscriptions.push(controller);
+
+  const sidebarProvider = new CodexAccountsSidebarProvider(
+    context.extensionUri,
+    controller,
+  );
+  context.subscriptions.push(sidebarProvider);
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      "codexAccountsView",
+      sidebarProvider,
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codexAccounts.refresh", async () => {
+      await controller.refresh();
+    }),
+    vscode.commands.registerCommand(
+      "codexAccounts.saveCurrentAccount",
+      async () => {
+        await controller.saveCurrentAccount();
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.switchAccount",
+      async (item) => {
+        await controller.switchAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.removeAccount",
+      async (item) => {
+        await controller.removeAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.renameAccount",
+      async (item) => {
+        await controller.renameAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.importBundle",
+      async () => {
+        await controller.importBundle();
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.exportBundle",
+      async () => {
+        await controller.exportBundle();
+      },
+    ),
+    vscode.commands.registerCommand("codexAccounts.startLogin", async () => {
+      await controller.startLogin();
+    }),
+    vscode.commands.registerCommand("codexAccounts.openCodexHome", async () => {
+      await controller.openCodexHome();
+    }),
+    vscode.commands.registerCommand(
+      "codexAccounts.refreshUsage",
+      async (item) => {
+        await controller.refreshUsage(item);
+      },
+    ),
+  );
+
+  await controller.initialize();
+}
+
+export function deactivate(): void {
+  // No-op; controller disposal is wired through extension subscriptions.
+}
