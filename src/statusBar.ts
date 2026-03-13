@@ -5,19 +5,6 @@ import type { ControllerState } from "./controller";
 import { CodexAccountsController } from "./controller";
 import type { ManagedAccount } from "./types";
 
-type StatusMenuAction =
-  | "openSidebar"
-  | "switchAccount"
-  | "refreshUsage"
-  | "saveCurrent"
-  | "startLogin"
-  | "importBundle"
-  | "exportBundle";
-
-type StatusMenuItem =
-  | (vscode.QuickPickItem & { action: StatusMenuAction })
-  | (vscode.QuickPickItem & { action?: undefined });
-
 export class CodexAccountsStatusBarController implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private item: vscode.StatusBarItem | undefined;
@@ -60,107 +47,14 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
 
     const usage = summarizeUsage(active);
     this.item.text = `$(pulse) ${usage}`;
-    this.item.tooltip = buildTooltip(active);
+    this.item.tooltip = `${buildTooltip(active)}\nClick to open the full sidebar.`;
     this.item.show();
-  }
-
-  public async openMenu(): Promise<void> {
-    const active = this.controller.getState().accounts.find((account) => account.isActive);
-    const infoLines = getUsageInfoLines(active);
-
-    const menuItems: StatusMenuItem[] = [
-      {
-        label: `$(pulse) ${infoLines.summary}`,
-        description: active ? `Active: ${getAccountLabel(active.record)}` : "No active account",
-      },
-      {
-        label: infoLines.resets,
-      },
-      {
-        label: "",
-        kind: vscode.QuickPickItemKind.Separator,
-      },
-      {
-        label: "$(sidebar-left) Open Full Sidebar",
-        description: "Open the large Codex Accounts panel.",
-        action: "openSidebar",
-      },
-      {
-        label: "$(arrow-swap) Switch Account",
-        description: "Pick and switch active account snapshot.",
-        action: "switchAccount",
-      },
-      {
-        label: "$(history) Refresh Usage",
-        description: active
-          ? `Refresh usage for ${getAccountLabel(active.record)}`
-          : "Refresh usage for all managed accounts",
-        action: "refreshUsage",
-      },
-      {
-        label: "$(archive) Save Current Account",
-        description: "Capture the current ~/.codex/auth.json snapshot.",
-        action: "saveCurrent",
-      },
-      {
-        label: "$(plus) Start New Login",
-        description: "Open terminal and run codex login.",
-        action: "startLogin",
-      },
-      {
-        label: "$(folder-opened) Import Bundle",
-        description: "Import account snapshots from JSON.",
-        action: "importBundle",
-      },
-      {
-        label: "$(export) Export Bundle",
-        description: "Export all managed account snapshots.",
-        action: "exportBundle",
-      },
-    ];
-
-    const action = await vscode.window.showQuickPick(menuItems, {
-      placeHolder: "Codex Accounts",
-      ignoreFocusOut: true,
-    });
-    if (!action) {
-      return;
-    }
-    if (!("action" in action) || !action.action) {
-      return;
-    }
-
-    switch (action.action) {
-      case "openSidebar":
-        await vscode.commands.executeCommand("codexAccounts.openSidebar");
-        break;
-      case "switchAccount":
-        await vscode.commands.executeCommand("codexAccounts.switchAccount");
-        break;
-      case "refreshUsage":
-        await vscode.commands.executeCommand("codexAccounts.refreshUsage");
-        break;
-      case "saveCurrent":
-        await vscode.commands.executeCommand("codexAccounts.saveCurrentAccount");
-        break;
-      case "startLogin":
-        await vscode.commands.executeCommand("codexAccounts.startLogin");
-        break;
-      case "importBundle":
-        await vscode.commands.executeCommand("codexAccounts.importBundle");
-        break;
-      case "exportBundle":
-        await vscode.commands.executeCommand("codexAccounts.exportBundle");
-        break;
-      default:
-        break;
-    }
   }
 
   private createStatusBarItem(): void {
     this.item?.dispose();
     this.item = vscode.window.createStatusBarItem(getAlignment(), 120);
-    this.item.command = "codexAccounts.statusBarMenu";
+    this.item.command = "codexAccounts.openSidebar";
     this.item.name = "Codex Accounts";
   }
 }
@@ -213,40 +107,4 @@ function buildTooltip(active: ManagedAccount): string {
     lines.push(`1w remaining: ${weekly.remainingPercent ?? "--"}%`);
   }
   return lines.join("\n");
-}
-
-function getUsageInfoLines(active: ManagedAccount | undefined): {
-  summary: string;
-  resets: string;
-} {
-  if (!active?.record.usage) {
-    return {
-      summary: "5h -- | 1w --",
-      resets: "Resets: unavailable",
-    };
-  }
-
-  const usage = active.record.usage;
-  const fiveHour = usage.windows.find((window) => window.key === "5h");
-  const weekly = usage.windows.find((window) => window.key === "1w");
-  const fiveHourText = fiveHour?.remainingPercent != null ? `${fiveHour.remainingPercent}%` : "--";
-  const weeklyText = weekly?.remainingPercent != null ? `${weekly.remainingPercent}%` : "--";
-  const reset5h = formatResetTime(fiveHour?.resetsAt ?? null);
-  const reset1w = formatResetTime(weekly?.resetsAt ?? null);
-
-  return {
-    summary: `5h ${fiveHourText} | 1w ${weeklyText}`,
-    resets: `Reset: 5h ${reset5h} · 1w ${reset1w}`,
-  };
-}
-
-function formatResetTime(iso: string | null): string {
-  if (!iso) {
-    return "--";
-  }
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return "--";
-  }
-  return date.toLocaleString();
 }

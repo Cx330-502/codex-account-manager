@@ -23,8 +23,8 @@
 ## 快速使用
 
 1. 看底栏 `Codex Accounts` 状态项：会显示当前账号的 `5h / 1周` 剩余额度
-2. 点击底栏状态项，直接执行 `Switch / Refresh Usage / Import / Export / Start Login` 等基础操作
-3. 需要完整卡片式管理界面时，在小窗口里点 `Open Full Sidebar`
+2. 点击底栏状态项，直接打开完整的 `Codex Accounts` 侧边栏
+3. 在大侧边栏里执行 `Switch / Refresh Usage / Import / Export / Start Login` 等操作
 4. 登录新账号后，插件会自动捕获并纳入管理
 
 ## 额度显示说明

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.1.2] - 2026-03-13
+
+- Simplified status bar behavior: clicking the quota item now opens the full sidebar directly.
+- Removed the temporary quick popup action menu from the status bar flow.
+
 ## [0.1.1] - 2026-03-13
 
 - Moved the full accounts panel back to a dedicated `Codex Accounts` sidebar container.
