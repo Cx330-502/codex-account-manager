@@ -96,7 +96,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await statusBar.openMenu();
     }),
     vscode.commands.registerCommand("codexAccounts.openSidebar", async () => {
-      await vscode.commands.executeCommand("workbench.view.explorer");
+      await vscode.commands.executeCommand("workbench.view.extension.codexAccounts");
       await vscode.commands.executeCommand("codexAccountsView.focus");
     }),
   );

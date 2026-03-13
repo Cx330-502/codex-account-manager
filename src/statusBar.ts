@@ -14,6 +14,10 @@ type StatusMenuAction =
   | "importBundle"
   | "exportBundle";
 
+type StatusMenuItem =
+  | (vscode.QuickPickItem & { action: StatusMenuAction })
+  | (vscode.QuickPickItem & { action?: undefined });
+
 export class CodexAccountsStatusBarController implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private item: vscode.StatusBarItem | undefined;
@@ -48,67 +52,81 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
 
     const active = state.accounts.find((account) => account.isActive);
     if (!active) {
-      this.item.text = "$(account) Codex: no account";
-      this.item.tooltip = "No active managed account.";
+      this.item.text = "$(pulse) 5h -- | 1w --";
+      this.item.tooltip = "No active managed account. Click to open quick actions.";
       this.item.show();
       return;
     }
 
     const usage = summarizeUsage(active);
-    this.item.text = `$(account) ${usage}`;
+    this.item.text = `$(pulse) ${usage}`;
     this.item.tooltip = buildTooltip(active);
     this.item.show();
   }
 
   public async openMenu(): Promise<void> {
     const active = this.controller.getState().accounts.find((account) => account.isActive);
+    const infoLines = getUsageInfoLines(active);
 
-    const action = await vscode.window.showQuickPick(
-      [
-        {
-          label: "$(sidebar-left) Open Accounts Sidebar",
-          description: "Show the full Codex Accounts panel in Explorer.",
-          action: "openSidebar" as StatusMenuAction,
-        },
-        {
-          label: "$(arrow-swap) Switch Account",
-          description: "Pick and switch active account snapshot.",
-          action: "switchAccount" as StatusMenuAction,
-        },
-        {
-          label: "$(history) Refresh Usage",
-          description: active
-            ? `Refresh usage for ${getAccountLabel(active.record)}`
-            : "Refresh usage for all managed accounts",
-          action: "refreshUsage" as StatusMenuAction,
-        },
-        {
-          label: "$(archive) Save Current Account",
-          description: "Capture the current ~/.codex/auth.json snapshot.",
-          action: "saveCurrent" as StatusMenuAction,
-        },
-        {
-          label: "$(plus) Start New Login",
-          description: "Open terminal and run codex login.",
-          action: "startLogin" as StatusMenuAction,
-        },
-        {
-          label: "$(folder-opened) Import Bundle",
-          description: "Import account snapshots from JSON.",
-          action: "importBundle" as StatusMenuAction,
-        },
-        {
-          label: "$(export) Export Bundle",
-          description: "Export all managed account snapshots.",
-          action: "exportBundle" as StatusMenuAction,
-        },
-      ],
+    const menuItems: StatusMenuItem[] = [
       {
-        placeHolder: "Codex Accounts",
-        ignoreFocusOut: true,
+        label: `$(pulse) ${infoLines.summary}`,
+        description: active ? `Active: ${getAccountLabel(active.record)}` : "No active account",
       },
-    );
+      {
+        label: infoLines.resets,
+      },
+      {
+        label: "",
+        kind: vscode.QuickPickItemKind.Separator,
+      },
+      {
+        label: "$(sidebar-left) Open Full Sidebar",
+        description: "Open the large Codex Accounts panel.",
+        action: "openSidebar",
+      },
+      {
+        label: "$(arrow-swap) Switch Account",
+        description: "Pick and switch active account snapshot.",
+        action: "switchAccount",
+      },
+      {
+        label: "$(history) Refresh Usage",
+        description: active
+          ? `Refresh usage for ${getAccountLabel(active.record)}`
+          : "Refresh usage for all managed accounts",
+        action: "refreshUsage",
+      },
+      {
+        label: "$(archive) Save Current Account",
+        description: "Capture the current ~/.codex/auth.json snapshot.",
+        action: "saveCurrent",
+      },
+      {
+        label: "$(plus) Start New Login",
+        description: "Open terminal and run codex login.",
+        action: "startLogin",
+      },
+      {
+        label: "$(folder-opened) Import Bundle",
+        description: "Import account snapshots from JSON.",
+        action: "importBundle",
+      },
+      {
+        label: "$(export) Export Bundle",
+        description: "Export all managed account snapshots.",
+        action: "exportBundle",
+      },
+    ];
+
+    const action = await vscode.window.showQuickPick(menuItems, {
+      placeHolder: "Codex Accounts",
+      ignoreFocusOut: true,
+    });
     if (!action) {
+      return;
+    }
+    if (!("action" in action) || !action.action) {
       return;
     }
 
@@ -157,7 +175,7 @@ function getAlignment(): vscode.StatusBarAlignment {
 function summarizeUsage(active: ManagedAccount): string {
   const usage = active.record.usage;
   if (!usage) {
-    return "Codex usage --";
+    return "5h -- | 1w --";
   }
 
   const fiveHour = usage.windows.find((window) => window.key === "5h")?.remainingPercent;
@@ -170,10 +188,10 @@ function summarizeUsage(active: ManagedAccount): string {
     parts.push(`1w ${weekly}%`);
   }
   if (parts.length === 0) {
-    return `${getAccountLabel(active.record)} · usage --`;
+    return "5h -- | 1w --";
   }
 
-  return `${getAccountLabel(active.record)} · ${parts.join(" | ")}`;
+  return parts.join(" | ");
 }
 
 function buildTooltip(active: ManagedAccount): string {
@@ -195,4 +213,40 @@ function buildTooltip(active: ManagedAccount): string {
     lines.push(`1w remaining: ${weekly.remainingPercent ?? "--"}%`);
   }
   return lines.join("\n");
+}
+
+function getUsageInfoLines(active: ManagedAccount | undefined): {
+  summary: string;
+  resets: string;
+} {
+  if (!active?.record.usage) {
+    return {
+      summary: "5h -- | 1w --",
+      resets: "Resets: unavailable",
+    };
+  }
+
+  const usage = active.record.usage;
+  const fiveHour = usage.windows.find((window) => window.key === "5h");
+  const weekly = usage.windows.find((window) => window.key === "1w");
+  const fiveHourText = fiveHour?.remainingPercent != null ? `${fiveHour.remainingPercent}%` : "--";
+  const weeklyText = weekly?.remainingPercent != null ? `${weekly.remainingPercent}%` : "--";
+  const reset5h = formatResetTime(fiveHour?.resetsAt ?? null);
+  const reset1w = formatResetTime(weekly?.resetsAt ?? null);
+
+  return {
+    summary: `5h ${fiveHourText} | 1w ${weeklyText}`,
+    resets: `Reset: 5h ${reset5h} · 1w ${reset1w}`,
+  };
+}
+
+function formatResetTime(iso: string | null): string {
+  if (!iso) {
+    return "--";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  return date.toLocaleString();
 }

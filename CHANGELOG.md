@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.1.1] - 2026-03-13
+
+- Moved the full accounts panel back to a dedicated `Codex Accounts` sidebar container.
+- Kept the status bar as primary entry and switched it to quota-only text (`5h` and `1w`) without account name.
+- Added a compact quick menu from the status bar for common actions plus opening the full sidebar.
+- Added configurable status bar position (`codexAccounts.statusBarAlignment`: `left` or `right`).
+
 ## [0.1.0] - 2026-03-13
 
 - First Marketplace release of the extension.

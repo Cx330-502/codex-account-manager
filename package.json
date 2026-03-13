@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -112,11 +112,20 @@
         "icon": "$(sidebar-left)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexAccounts",
+          "title": "Codex Accounts",
+          "icon": "media/codex-accounts.svg"
+        }
+      ]
+    },
     "views": {
-      "explorer": [
+      "codexAccounts": [
         {
           "id": "codexAccountsView",
-          "name": "Codex Accounts",
+          "name": "Accounts",
           "type": "webview"
         }
       ]

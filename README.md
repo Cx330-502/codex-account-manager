@@ -5,7 +5,7 @@
 ## 功能
 
 - 底栏状态入口：在 VS Code 状态栏直接显示当前账号 `5h / 1周` 额度，点击即可打开操作菜单
-- 侧边栏面板保留：完整账号管理面板仍可在 Explorer 中打开
+- 侧边栏面板保留：完整账号管理面板仍可在独立 `Codex Accounts` 侧边栏中打开
 - 多账号快照管理：把不同账号的 `auth.json` 保存到 `~/.codex/account-manager/accounts/*.json`
 - 自动识别新账号：监听 `~/.codex/auth.json`，登录新账号后自动纳入管理
 - 一键切换账号：把选中的快照写回 `~/.codex/auth.json`
@@ -24,7 +24,7 @@
 
 1. 看底栏 `Codex Accounts` 状态项：会显示当前账号的 `5h / 1周` 剩余额度
 2. 点击底栏状态项，直接执行 `Switch / Refresh Usage / Import / Export / Start Login` 等基础操作
-3. 需要完整卡片式管理界面时，在 Explorer 打开 `Codex Accounts` 视图
+3. 需要完整卡片式管理界面时，在小窗口里点 `Open Full Sidebar`
 4. 登录新账号后，插件会自动捕获并纳入管理
 
 ## 额度显示说明
