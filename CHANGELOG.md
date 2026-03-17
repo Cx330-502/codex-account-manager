@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.2] - 2026-03-17
+
+- Fixed account fingerprinting for team/workspace-shared environments by preferring user-scoped claims like `email` and `sub` over shared workspace ids, so distinct accounts no longer collapse into one managed snapshot.
+
 ## [0.2.1] - 2026-03-17
 
 - Fixed `Start New Login` so it now saves the current snapshot first, then starts a clean `codex logout` + `codex login` flow instead of reusing the old live auth state.

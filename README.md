@@ -11,6 +11,7 @@
 - 多账号快照管理：把不同账号的 `auth.json` 保存到 `~/.codex/account-manager/accounts/*.json`
 - 自动识别新账号：监听 `~/.codex/auth.json`，登录新账号后自动纳入管理
 - 干净登录新账号：`Start Login` 会先保存当前账号，再执行一次干净的 `codex logout && codex login`
+- Team / workspace 共用场景可分离：同一个 team / workspace 下的不同账号会按用户身份分别建档，不再错误合并
 - 一键切换账号：把选中的快照写回 `~/.codex/auth.json`
 - 一键导入 / 导出：导出为单个 JSON bundle，方便跨平台迁移
 - 使用额度展示：按官方 Codex 扩展的接口规则，展示 `5h` 和 `1周` 两层额度

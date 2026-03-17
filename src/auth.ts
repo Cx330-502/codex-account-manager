@@ -67,11 +67,13 @@ export function deriveAccountIdentity(auth: CodexAuthFile): {
   const authMode = normalizeString(auth.auth_mode);
   const expiresAt = toIsoDate(idClaims?.exp ?? accessClaims?.exp);
 
+  // Team/workspace-scoped ids can be shared by different users, so prefer
+  // user-scoped claims first to avoid merging distinct accounts into one snapshot.
   const fingerprintBase =
-    chatgptAccountId ??
-    accountId ??
     email ??
     subject ??
+    chatgptAccountId ??
+    accountId ??
     name ??
     JSON.stringify(auth);
 
