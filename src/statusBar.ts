@@ -8,6 +8,7 @@ import type { ManagedAccount } from "./types";
 export class CodexAccountsStatusBarController implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private item: vscode.StatusBarItem | undefined;
+  private restartItem: vscode.StatusBarItem | undefined;
 
   public constructor(private readonly controller: CodexAccountsController) {
     this.createStatusBarItem();
@@ -30,6 +31,8 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     this.disposables.length = 0;
     this.item?.dispose();
     this.item = undefined;
+    this.restartItem?.dispose();
+    this.restartItem = undefined;
   }
 
   public render(state: ControllerState): void {
@@ -42,13 +45,15 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
       this.item.text = "$(pulse) 5h -- | 1w --";
       this.item.tooltip = "No active managed account. Click to open quick actions.";
       this.item.show();
+      this.renderRestartState(state);
       return;
     }
 
     const usage = summarizeUsage(active);
     this.item.text = `$(pulse) ${usage}`;
-    this.item.tooltip = `${buildTooltip(active)}\nClick to open the full sidebar.`;
+    this.item.tooltip = `${buildTooltip(active, state)}\nClick to open the full sidebar.`;
     this.item.show();
+    this.renderRestartState(state);
   }
 
   private createStatusBarItem(): void {
@@ -56,6 +61,32 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     this.item = vscode.window.createStatusBarItem(getAlignment(), 120);
     this.item.command = "codexAccounts.openSidebar";
     this.item.name = "Codex Accounts";
+
+    this.restartItem?.dispose();
+    this.restartItem = vscode.window.createStatusBarItem(getAlignment(), 121);
+    this.restartItem.command = "codexAccounts.reloadWindow";
+    this.restartItem.name = "Codex Accounts Restart";
+  }
+
+  private renderRestartState(state: ControllerState): void {
+    if (!this.restartItem) {
+      return;
+    }
+
+    if (!state.restart.thisWindowNeedsReload) {
+      this.restartItem.hide();
+      return;
+    }
+
+    const currentLabel = state.restart.currentWindowAccountLabel ?? "previous account";
+    const liveLabel = state.restart.liveAccountLabel ?? "new account";
+    this.restartItem.text = `$(warning) Reload: ${currentLabel} -> ${liveLabel}`;
+    this.restartItem.tooltip =
+      `This window still uses ${currentLabel} until reload.\n` +
+      `Live auth.json now points to ${liveLabel}.\n` +
+      `Pending windows: ${state.restart.pendingWindowCount}\n` +
+      "Click to reload this VS Code window.";
+    this.restartItem.show();
   }
 }
 
@@ -88,11 +119,19 @@ function summarizeUsage(active: ManagedAccount): string {
   return parts.join(" | ");
 }
 
-function buildTooltip(active: ManagedAccount): string {
+function buildTooltip(active: ManagedAccount, state: ControllerState): string {
   const lines: string[] = [
     `Active: ${getAccountLabel(active.record)}`,
     "Click for switch/import/export/refresh actions.",
   ];
+  if (state.restart.thisWindowNeedsReload) {
+    lines.push(
+      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the previous account"}.`,
+    );
+    lines.push(
+      `Live auth switched to ${state.restart.liveAccountLabel ?? "the new account"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
+    );
+  }
   const usage = active.record.usage;
   if (!usage) {
     lines.push("Usage: unavailable");

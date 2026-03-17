@@ -86,6 +86,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAccounts.openCodexHome", async () => {
       await controller.openCodexHome();
     }),
+    vscode.commands.registerCommand("codexAccounts.reloadWindow", async () => {
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
+    }),
     vscode.commands.registerCommand(
       "codexAccounts.refreshUsage",
       async (item) => {

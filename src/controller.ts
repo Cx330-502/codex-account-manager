@@ -1,16 +1,23 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import * as vscode from "vscode";
 
 import { getAccountLabel, quoteForShell } from "./auth";
 import { CodexAccountStore } from "./store";
-import type { AccountRecord, ManagedAccount, SharedStateInfo } from "./types";
+import type {
+  AccountRecord,
+  ManagedAccount,
+  RuntimeState,
+  SharedStateInfo,
+} from "./types";
 import { UsageService } from "./usage";
 
 export interface ControllerState {
   accounts: ManagedAccount[];
   sharedState: SharedStateInfo;
+  restart: RestartState;
   lastError: string | null;
 }
 
@@ -18,22 +25,44 @@ interface RefreshUsageOptions {
   reason?: "manual" | "background";
 }
 
+export interface RestartState {
+  thisWindowNeedsReload: boolean;
+  currentWindowAccountId: string | null;
+  currentWindowAccountLabel: string | null;
+  liveAccountId: string | null;
+  liveAccountLabel: string | null;
+  switchedAt: string | null;
+  pendingWindowCount: number;
+}
+
+const FILE_WATCH_INTERVAL_MS = 1500;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const AUTO_REFRESH_TICK_MS = 60_000;
+const AUTO_REFRESH_LEASE_MS = 2 * 60_000;
+
 export class CodexAccountsController implements vscode.Disposable {
   private readonly onDidChangeStateEmitter = new vscode.EventEmitter<ControllerState>();
+  private readonly windowId: string;
 
   public readonly onDidChangeState = this.onDidChangeStateEmitter.event;
 
   private watchDebounce: NodeJS.Timeout | undefined;
+  private registryWatchDebounce: NodeJS.Timeout | undefined;
+  private heartbeatTimer: NodeJS.Timeout | undefined;
+  private autoRefreshTimer: NodeJS.Timeout | undefined;
   private disposed = false;
   private state: ControllerState;
 
   public constructor(
     private readonly store: CodexAccountStore,
     private readonly usageService: UsageService,
+    windowId: string = randomUUID(),
   ) {
+    this.windowId = windowId;
     this.state = {
       accounts: [],
       sharedState: this.store.getSharedStateInfo(),
+      restart: emptyRestartState(),
       lastError: null,
     };
   }
@@ -44,8 +73,14 @@ export class CodexAccountsController implements vscode.Disposable {
 
   public async initialize(): Promise<void> {
     await this.store.ensureReady();
+    const accounts = await this.store.listAccounts();
+    const activeAccountId =
+      accounts.find((account) => account.isActive)?.record.id ?? null;
+    await this.store.registerWindowSession(this.windowId, activeAccountId);
     await this.refresh(false);
-    this.startWatchingAuthFile();
+    this.startWatchingFiles();
+    this.startIntervals();
+    await this.runAutoRefreshTick();
   }
 
   public dispose(): void {
@@ -53,16 +88,29 @@ export class CodexAccountsController implements vscode.Disposable {
     if (this.watchDebounce) {
       clearTimeout(this.watchDebounce);
     }
+    if (this.registryWatchDebounce) {
+      clearTimeout(this.registryWatchDebounce);
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+    }
+    if (this.autoRefreshTimer) {
+      clearInterval(this.autoRefreshTimer);
+    }
     fs.unwatchFile(this.store.authPath);
+    fs.unwatchFile(this.store.registryPath);
+    void this.store.removeWindowSession(this.windowId);
     this.onDidChangeStateEmitter.dispose();
   }
 
   public async refresh(triggerUsage: boolean | undefined = undefined): Promise<void> {
     try {
       const accounts = await this.store.listAccounts();
+      const runtime = await this.store.getRuntimeState();
       this.updateState({
         accounts,
         sharedState: this.store.getSharedStateInfo(),
+        restart: this.buildRestartState(accounts, runtime),
         lastError: null,
       });
 
@@ -80,6 +128,7 @@ export class CodexAccountsController implements vscode.Disposable {
       this.updateState({
         accounts: [],
         sharedState: this.store.getSharedStateInfo(),
+        restart: emptyRestartState(),
         lastError: toErrorMessage(error),
       });
     }
@@ -103,14 +152,18 @@ export class CodexAccountsController implements vscode.Disposable {
       return;
     }
 
+    const accounts = await this.store.listAccounts();
+    const previousActiveAccount =
+      accounts.find((entry) => entry.isActive)?.record.id ?? null;
     await this.store.switchToAccount(account.record.id);
+    await this.store.recordSwitch(previousActiveAccount, account.record.id);
     await this.refresh(false);
     void this.refreshUsage(account.record.id, {
       reason: "background",
     });
 
     vscode.window.showInformationMessage(
-      `Switched Codex auth.json to ${getAccountLabel(account.record)}. sessions/memories stayed shared.`,
+      `Switched Codex auth.json to ${getAccountLabel(account.record)}. Existing windows should reload before new Codex runs use the new account.`,
     );
   }
 
@@ -250,8 +303,11 @@ export class CodexAccountsController implements vscode.Disposable {
       }
 
       try {
-        const usage = await this.usageService.fetchUsage(account.auth);
-        await this.store.setUsage(account.record.id, usage, null);
+        const result = await this.usageService.fetchUsage(account.auth);
+        if (result.authRefreshed) {
+          await this.store.updateAccountAuth(account.record.id, result.auth);
+        }
+        await this.store.setUsage(account.record.id, result.usage, null);
         refreshedCount += 1;
       } catch (error) {
         await this.store.setUsage(account.record.id, undefined, toErrorMessage(error));
@@ -314,30 +370,49 @@ export class CodexAccountsController implements vscode.Disposable {
     this.onDidChangeStateEmitter.fire(this.state);
   }
 
-  private startWatchingAuthFile(): void {
+  private startWatchingFiles(): void {
     const autoCapture = vscode.workspace
       .getConfiguration("codexAccounts")
       .get<boolean>("autoCaptureCurrent", true);
-    if (!autoCapture) {
-      return;
+    if (autoCapture) {
+      fs.watchFile(
+        this.store.authPath,
+        { interval: FILE_WATCH_INTERVAL_MS },
+        (currentStats, previousStats) => {
+          if (this.disposed || currentStats.mtimeMs === previousStats.mtimeMs) {
+            return;
+          }
+
+          if (this.watchDebounce) {
+            clearTimeout(this.watchDebounce);
+          }
+          this.watchDebounce = setTimeout(() => {
+            void this.captureFromWatch();
+          }, 400);
+        },
+      );
     }
 
     fs.watchFile(
-      this.store.authPath,
-      { interval: 1500 },
+      this.store.registryPath,
+      { interval: FILE_WATCH_INTERVAL_MS },
       (currentStats, previousStats) => {
         if (this.disposed || currentStats.mtimeMs === previousStats.mtimeMs) {
           return;
         }
-
-        if (this.watchDebounce) {
-          clearTimeout(this.watchDebounce);
-        }
-        this.watchDebounce = setTimeout(() => {
-          void this.captureFromWatch();
-        }, 400);
+        this.scheduleRegistryRefresh();
       },
     );
+  }
+
+  private startIntervals(): void {
+    this.heartbeatTimer = setInterval(() => {
+      void this.runHeartbeatTick();
+    }, HEARTBEAT_INTERVAL_MS);
+
+    this.autoRefreshTimer = setInterval(() => {
+      void this.runAutoRefreshTick();
+    }, AUTO_REFRESH_TICK_MS);
   }
 
   private async captureFromWatch(): Promise<void> {
@@ -351,6 +426,67 @@ export class CodexAccountsController implements vscode.Disposable {
       }
     } catch {
       // Ignore watcher errors; state refresh already surfaces persistent issues.
+    }
+  }
+
+  private scheduleRegistryRefresh(): void {
+    if (this.registryWatchDebounce) {
+      clearTimeout(this.registryWatchDebounce);
+    }
+    this.registryWatchDebounce = setTimeout(() => {
+      void this.refresh(false);
+    }, 250);
+  }
+
+  private async runAutoRefreshTick(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+
+    try {
+      const accounts = await this.store.listAccounts();
+      if (accounts.length === 0) {
+        return;
+      }
+
+      const minIntervalMs = getUsageRefreshMinIntervalMinutes() * 60_000;
+      const hasDueAccounts = accounts.some(
+        (account) => !shouldSkipUsageRefresh(account.record, minIntervalMs),
+      );
+      if (!hasDueAccounts) {
+        return;
+      }
+
+      const acquired = await this.store.tryAcquireUsageRefreshLease(
+        this.windowId,
+        AUTO_REFRESH_LEASE_MS,
+      );
+      if (!acquired) {
+        return;
+      }
+
+      try {
+        await this.refreshUsage(undefined, {
+          reason: "background",
+        });
+      } finally {
+        await this.store.releaseUsageRefreshLease(this.windowId);
+      }
+    } catch {
+      // Keep background refresh silent; state refresh and usage errors remain visible.
+    }
+  }
+
+  private async runHeartbeatTick(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+
+    try {
+      await this.store.heartbeatWindowSession(this.windowId);
+      await this.refresh(false);
+    } catch {
+      // Ignore heartbeat refresh failures; next registry refresh will recover.
     }
   }
 
@@ -408,6 +544,34 @@ export class CodexAccountsController implements vscode.Disposable {
 
     return "codex";
   }
+
+  private buildRestartState(
+    accounts: ManagedAccount[],
+    runtime: RuntimeState,
+  ): RestartState {
+    const activeAccount = accounts.find((account) => account.isActive) ?? null;
+    const activeAccountId = activeAccount?.record.id ?? runtime.lastSwitch?.nextAccountId ?? null;
+    const session = runtime.windowSessions.find((entry) => entry.id === this.windowId) ?? null;
+    const currentGeneration = runtime.lastSwitch?.generation ?? 0;
+    const thisWindowNeedsReload = Boolean(
+      session && session.acknowledgedSwitchGeneration < currentGeneration,
+    );
+    const currentWindowAccountId = thisWindowNeedsReload
+      ? session?.runtimeAccountId ?? null
+      : activeAccountId;
+
+    return {
+      thisWindowNeedsReload,
+      currentWindowAccountId,
+      currentWindowAccountLabel: getAccountLabelById(accounts, currentWindowAccountId),
+      liveAccountId: activeAccountId,
+      liveAccountLabel: getAccountLabelById(accounts, activeAccountId),
+      switchedAt: runtime.lastSwitch?.switchedAt ?? null,
+      pendingWindowCount: runtime.windowSessions.filter(
+        (entry) => entry.acknowledgedSwitchGeneration < currentGeneration,
+      ).length,
+    };
+  }
 }
 
 type AccountTarget =
@@ -460,6 +624,29 @@ function mapArch(arch: string): "aarch64" | "x86_64" | null {
     default:
       return null;
   }
+}
+
+function emptyRestartState(): RestartState {
+  return {
+    thisWindowNeedsReload: false,
+    currentWindowAccountId: null,
+    currentWindowAccountLabel: null,
+    liveAccountId: null,
+    liveAccountLabel: null,
+    switchedAt: null,
+    pendingWindowCount: 0,
+  };
+}
+
+function getAccountLabelById(
+  accounts: ManagedAccount[],
+  accountId: string | null,
+): string | null {
+  if (!accountId) {
+    return null;
+  }
+  const matchedAccount = accounts.find((account) => account.record.id === accountId);
+  return matchedAccount ? getAccountLabel(matchedAccount.record) : accountId;
 }
 
 function toErrorMessage(error: unknown): string {

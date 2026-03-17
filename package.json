@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -24,6 +24,7 @@
     "workspace"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:codexAccountsView",
     "onCommand:codexAccounts.refresh",
     "onCommand:codexAccounts.saveCurrentAccount",
@@ -35,6 +36,7 @@
     "onCommand:codexAccounts.startLogin",
     "onCommand:codexAccounts.openCodexHome",
     "onCommand:codexAccounts.refreshUsage",
+    "onCommand:codexAccounts.reloadWindow",
     "onCommand:codexAccounts.openSidebar"
   ],
   "main": "./out/extension.js",
@@ -93,6 +95,12 @@
         "title": "Codex Accounts: Open Codex Home",
         "shortTitle": "Open Codex Home",
         "icon": "$(folder)"
+      },
+      {
+        "command": "codexAccounts.reloadWindow",
+        "title": "Codex Accounts: Reload Window",
+        "shortTitle": "Reload Window",
+        "icon": "$(debug-restart)"
       },
       {
         "command": "codexAccounts.refreshUsage",

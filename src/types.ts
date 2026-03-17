@@ -81,6 +81,34 @@ export interface AccountRegistry {
   accounts: AccountRecord[];
 }
 
+export interface WindowSessionRecord {
+  id: string;
+  startedAt: string;
+  lastSeenAt: string;
+  runtimeAccountId: string | null;
+  acknowledgedSwitchGeneration: number;
+}
+
+export interface UsageRefreshLease {
+  ownerWindowId: string;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
+export interface SwitchMarker {
+  generation: number;
+  previousAccountId: string | null;
+  nextAccountId: string | null;
+  switchedAt: string;
+}
+
+export interface RuntimeState {
+  version: 1;
+  lastSwitch: SwitchMarker | null;
+  windowSessions: WindowSessionRecord[];
+  usageRefreshLease: UsageRefreshLease | null;
+}
+
 export interface ManagedAccount {
   record: AccountRecord;
   auth: CodexAuthFile;
@@ -102,6 +130,8 @@ export interface ExportBundle {
 export interface SharedStateInfo {
   codexHome: string;
   authPath: string;
+  registryPath: string;
+  runtimeStatePath: string;
   sessionsPath: string;
   memoriesPath: string;
   sqlitePath: string;

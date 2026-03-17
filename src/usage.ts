@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
 
-import { deriveAccountIdentity } from "./auth";
+import { decodeJwtClaims, deriveAccountIdentity } from "./auth";
 import type { CodexAuthFile, UsageSnapshot, UsageWindowSummary } from "./types";
 
 const BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
 const ORIGINATOR = "codex_vscode";
 const REQUEST_TIMEOUT_MS = 12_000;
 const STATUS_MARKER = "__CODEX_STATUS__:";
+const TOKEN_REFRESH_ENDPOINT = "https://auth.openai.com/oauth/token";
+const TOKEN_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const TOKEN_REFRESH_STALE_MS = 8 * 24 * 60 * 60 * 1000;
 const MINUTES_IN_DAY = 24 * 60;
 const FIVE_HOUR_WINDOW_MINUTES = 5 * 60;
 const WEEKLY_WINDOW_MINUTES = 7 * MINUTES_IN_DAY;
@@ -63,14 +66,28 @@ type UsageResponse<T> = {
   sourceTimestamp: string | null;
 };
 
+export interface UsageFetchResult {
+  usage: UsageSnapshot;
+  auth: CodexAuthFile;
+  authRefreshed: boolean;
+}
+
 export class UsageService {
-  public async fetchUsage(auth: CodexAuthFile): Promise<UsageSnapshot> {
-    const accessToken = auth.tokens?.access_token;
+  public async fetchUsage(auth: CodexAuthFile): Promise<UsageFetchResult> {
+    let workingAuth = cloneAuthFile(auth);
+    let authRefreshed = false;
+
+    if (shouldProactivelyRefresh(workingAuth)) {
+      workingAuth = await this.refreshAuthTokens(workingAuth);
+      authRefreshed = true;
+    }
+
+    const accessToken = workingAuth.tokens?.access_token;
     if (!accessToken) {
       throw new Error("This account snapshot does not contain an access token.");
     }
 
-    const identity = deriveAccountIdentity(auth);
+    const identity = deriveAccountIdentity(workingAuth);
     const headers = new Map<string, string>([
       ["Authorization", `Bearer ${accessToken}`],
       ["originator", ORIGINATOR],
@@ -80,11 +97,37 @@ export class UsageService {
     }
 
     const endpoint = `${BACKEND_BASE_URL}/wham/usage`;
-    const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
-    return parseUsagePayload(response.body, {
-      fetchedAt: response.fetchedAt,
-      sourceTimestamp: response.sourceTimestamp,
-    });
+    try {
+      const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
+      return {
+        usage: parseUsagePayload(response.body, {
+          fetchedAt: response.fetchedAt,
+          sourceTimestamp: response.sourceTimestamp,
+        }),
+        auth: workingAuth,
+        authRefreshed,
+      };
+    } catch (error) {
+      if (!shouldRetryWithRefresh(error, workingAuth, authRefreshed)) {
+        throw error;
+      }
+
+      workingAuth = await this.refreshAuthTokens(workingAuth);
+      const retriedAccessToken = workingAuth.tokens?.access_token;
+      if (!retriedAccessToken) {
+        throw new Error("Token refresh succeeded but access token is still missing.");
+      }
+      headers.set("Authorization", `Bearer ${retriedAccessToken}`);
+      const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
+      return {
+        usage: parseUsagePayload(response.body, {
+          fetchedAt: response.fetchedAt,
+          sourceTimestamp: response.sourceTimestamp,
+        }),
+        auth: workingAuth,
+        authRefreshed: true,
+      };
+    }
   }
 
   private async requestJson<T>(
@@ -104,6 +147,16 @@ export class UsageService {
         );
       }
     }
+  }
+
+  private async refreshAuthTokens(auth: CodexAuthFile): Promise<CodexAuthFile> {
+    const refreshToken = normalizeString(auth.tokens?.refresh_token);
+    if (!refreshToken) {
+      throw new Error("This account does not have a refresh token. Please run `codex login` again.");
+    }
+
+    const response = await requestTokenRefresh(refreshToken);
+    return mergeRefreshedTokens(auth, response);
   }
 }
 
@@ -347,7 +400,7 @@ async function requestJsonWithFetch<T>(
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new HttpStatusError(response.status);
     }
 
     return {
@@ -382,7 +435,7 @@ async function requestJsonWithCurl<T>(
 
   const { statusCode, body, headersMap } = await runCurl(args);
   if (statusCode < 200 || statusCode >= 300) {
-    throw new Error(`HTTP ${statusCode}`);
+    throw new HttpStatusError(statusCode);
   }
 
   return {
@@ -507,6 +560,155 @@ function parseHeaderLines(headersBlock: string): Record<string, string> {
 
 function clampPercent(value: number): number {
   return Math.min(Math.max(Math.round(value), 0), 100);
+}
+
+class HttpStatusError extends Error {
+  public constructor(public readonly statusCode: number) {
+    super(`HTTP ${statusCode}`);
+    this.name = "HttpStatusError";
+  }
+}
+
+function shouldRetryWithRefresh(
+  error: unknown,
+  auth: CodexAuthFile,
+  authRefreshed: boolean,
+): boolean {
+  if (authRefreshed || !normalizeString(auth.tokens?.refresh_token)) {
+    return false;
+  }
+
+  return (
+    error instanceof HttpStatusError &&
+    (error.statusCode === 401 || error.statusCode === 403)
+  );
+}
+
+function shouldProactivelyRefresh(auth: CodexAuthFile): boolean {
+  if (!normalizeString(auth.tokens?.refresh_token)) {
+    return false;
+  }
+
+  const accessClaims = decodeJwtClaims(auth.tokens?.access_token);
+  const expiresAtMs =
+    typeof accessClaims?.exp === "number" ? accessClaims.exp * 1000 : NaN;
+  if (Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() <= 60_000) {
+    return true;
+  }
+
+  const lastRefreshMs = parseLastRefreshMs(auth.last_refresh);
+  return Number.isFinite(lastRefreshMs)
+    ? Date.now() - lastRefreshMs >= TOKEN_REFRESH_STALE_MS
+    : false;
+}
+
+function parseLastRefreshMs(value: string | number | undefined): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : NaN;
+  }
+  if (typeof value === "string") {
+    const asNumber = Number.parseFloat(value);
+    if (Number.isFinite(asNumber)) {
+      return asNumber;
+    }
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? NaN : parsed;
+  }
+  return NaN;
+}
+
+type TokenRefreshPayload = {
+  access_token?: string;
+  refresh_token?: string;
+  id_token?: string;
+  error?: string | { code?: string };
+  code?: string;
+};
+
+async function requestTokenRefresh(refreshToken: string): Promise<TokenRefreshPayload> {
+  const payload = {
+    client_id: TOKEN_REFRESH_CLIENT_ID,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    scope: "openid profile email",
+  };
+
+  const response = await fetch(TOKEN_REFRESH_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const responseText = await response.text();
+  let json: TokenRefreshPayload | null = null;
+  try {
+    json = JSON.parse(responseText) as TokenRefreshPayload;
+  } catch {
+    json = null;
+  }
+
+  if (response.status === 401) {
+    const errorCode = extractRefreshErrorCode(json);
+    switch (errorCode) {
+      case "refresh_token_reused":
+        throw new Error("Refresh token was already used. Please run `codex login` again.");
+      case "refresh_token_invalidated":
+        throw new Error("Refresh token was revoked. Please run `codex login` again.");
+      case "refresh_token_expired":
+      default:
+        throw new Error("Refresh token expired. Please run `codex login` again.");
+    }
+  }
+
+  if (!response.ok || !json) {
+    throw new Error(
+      `Token refresh failed: HTTP ${response.status}${responseText ? ` ${responseText}` : ""}`,
+    );
+  }
+
+  if (!normalizeString(json.access_token)) {
+    throw new Error("Token refresh response did not include a new access token.");
+  }
+
+  return json;
+}
+
+function extractRefreshErrorCode(payload: TokenRefreshPayload | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  if (typeof payload.error === "string") {
+    return payload.error;
+  }
+  if (typeof payload.error?.code === "string") {
+    return payload.error.code;
+  }
+  return typeof payload.code === "string" ? payload.code : null;
+}
+
+function mergeRefreshedTokens(
+  auth: CodexAuthFile,
+  payload: TokenRefreshPayload,
+): CodexAuthFile {
+  return {
+    ...auth,
+    last_refresh: new Date().toISOString(),
+    tokens: {
+      ...(auth.tokens ?? {}),
+      access_token: payload.access_token ?? auth.tokens?.access_token,
+      refresh_token: payload.refresh_token ?? auth.tokens?.refresh_token,
+      id_token: payload.id_token ?? auth.tokens?.id_token,
+    },
+  };
+}
+
+function cloneAuthFile(auth: CodexAuthFile): CodexAuthFile {
+  return {
+    ...auth,
+    tokens: auth.tokens ? { ...auth.tokens } : undefined,
+  };
 }
 
 function normalizeString(value: string | null | undefined): string | null {

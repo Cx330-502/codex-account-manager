@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.0] - 2026-03-17
+
+- Added startup activation so the status bar appears without opening the sidebar first.
+- Added cross-window switch markers and reload warnings, including a dedicated `Reload Window` action.
+- Added shared runtime state so all open VS Code windows can see pending-account-switch status.
+- Added background usage refresh while windows stay open, coordinated across windows to avoid duplicate refresh loops.
+- Added automatic Codex token refresh before usage fetches, plus visible refresh failure errors for expired accounts.
+
 ## [0.1.2] - 2026-03-13
 
 - Simplified status bar behavior: clicking the quota item now opens the full sidebar directly.

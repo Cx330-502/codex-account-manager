@@ -1,16 +1,20 @@
 # Codex Account Manager
 
-一个 VS Code 扩展，用来管理多个 Codex / ChatGPT 账号快照。插件只切换 `~/.codex/auth.json`，因此本地 `sessions/`、`memories/`、`state_5.sqlite` 会天然保持共通，不会因为切账号而被分叉。
+一个 VS Code 扩展，用来管理多个 Codex / ChatGPT 官方账号快照。插件只切换 `~/.codex/auth.json`，因此本地 `sessions/`、`memories/`、`state_5.sqlite` 会天然保持共通，不会因为切账号而被分叉。
 
 ## 功能
 
-- 底栏状态入口：在 VS Code 状态栏直接显示当前账号 `5h / 1周` 额度，点击即可打开操作菜单
-- 侧边栏面板保留：完整账号管理面板仍可在独立 `Codex Accounts` 侧边栏中打开
+- 启动即显示底栏状态：VS Code 启动完成后自动激活，状态栏无需先打开侧边栏
+- 底栏状态入口：在 VS Code 状态栏直接显示当前账号 `5h / 1周` 额度，点击即可打开侧边栏
+- 切号待重启标记：切换账号后，会明确标记“已切换但当前窗口未重启”，并提供一键 `Reload Window`
+- 跨窗口同步提醒：如果同时开着多个 VS Code 窗口，其他窗口也会看到“等待重启”的提示，并显示重启前后各自使用的账号
 - 多账号快照管理：把不同账号的 `auth.json` 保存到 `~/.codex/account-manager/accounts/*.json`
 - 自动识别新账号：监听 `~/.codex/auth.json`，登录新账号后自动纳入管理
 - 一键切换账号：把选中的快照写回 `~/.codex/auth.json`
 - 一键导入 / 导出：导出为单个 JSON bundle，方便跨平台迁移
 - 使用额度展示：按官方 Codex 扩展的接口规则，展示 `5h` 和 `1周` 两层额度
+- usage 后台刷新：窗口开着时自动按间隔刷新 usage，并在多窗口之间共享刷新结果
+- 自动续 token：usage 刷新前会尽量自动续 `refresh_token`；若自动续失败，会明确展示错误
 - usage 更新时间展示：显示本地 snapshot 抓取时间，并尽量显示服务端 `Date` 响应时间
 - 跨账号共享本地状态：切换时**不会**改动 `sessions/`、`memories/`、`state_5.sqlite`
 
@@ -22,10 +26,11 @@
 
 ## 快速使用
 
-1. 看底栏 `Codex Accounts` 状态项：会显示当前账号的 `5h / 1周` 剩余额度
+1. 启动 VS Code 后直接看底栏 `Codex Accounts` 状态项：会显示当前账号的 `5h / 1周` 剩余额度
 2. 点击底栏状态项，直接打开完整的 `Codex Accounts` 侧边栏
-3. 在大侧边栏里执行 `Switch / Refresh Usage / Import / Export / Start Login` 等操作
-4. 登录新账号后，插件会自动捕获并纳入管理
+3. 在侧边栏里执行 `Switch / Refresh Usage / Reload Window / Import / Export / Start Login` 等操作
+4. 切号后，如果当前窗口还没重启，会看到明确的 `Reload Window` 提示
+5. 登录新账号后，插件会自动捕获并纳入管理
 
 ## 额度显示说明
 
@@ -35,7 +40,9 @@
   - 本地抓取时间（Snapshot）
   - 服务端响应时间（Server）
   - 两层额度的重置时刻（Reset time）
-- 默认有 10 分钟刷新冷却，避免频繁请求；可在设置中改 `codexAccounts.usageRefreshMinIntervalMinutes`
+- 默认有 10 分钟刷新冷却；窗口保持打开时会自动刷新，可在设置中改 `codexAccounts.usageRefreshMinIntervalMinutes`
+- 多个 VS Code 窗口会共享 refresh 结果，并尽量避免重复打接口
+- 对带 `refresh_token` 的账号，会优先尝试自动续 token；如果自动续失败，会把失败原因显示在状态栏 / 侧边栏中
 
 如果网络不可达、接口返回 `401/403/404`、或者某个账号没有可用 usage snapshot，侧边栏会显示 `usage unavailable`，但账号切换本身不受影响。
 
@@ -44,11 +51,13 @@
 - 插件只管理以下文件：
   - `~/.codex/auth.json`
   - `~/.codex/account-manager/registry.json`
+  - `~/.codex/account-manager/runtime.json`
   - `~/.codex/account-manager/accounts/*.json`
 - `Export` 文件包含认证信息，请按密钥文件级别管理
 
 ## 当前限制
 
+- 切换账号后，**新开的** Codex 会话会使用新账号；已经在跑的旧 Codex 进程仍可能继续使用旧账号，直到相关窗口 / 终端重启
 - `wham/usage` 返回里暂时没有看到专门的“余额最后结算时间”字段；当前展示的是本地抓取时间和服务端 `Date` 响应时间
 - 当前没有改动官方 Codex 扩展本体，只是围绕 `~/.codex/auth.json` 做外部管理
 

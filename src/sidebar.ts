@@ -11,6 +11,7 @@ type SidebarMessage =
   | { type: "saveCurrentAccount" }
   | { type: "importBundle" }
   | { type: "exportBundle" }
+  | { type: "reloadWindow" }
   | { type: "startLogin" }
   | { type: "openCodexHome" }
   | { type: "switchAccount"; id: string }
@@ -73,6 +74,9 @@ export class CodexAccountsSidebarProvider
       case "exportBundle":
         await vscode.commands.executeCommand("codexAccounts.exportBundle");
         break;
+      case "reloadWindow":
+        await vscode.commands.executeCommand("codexAccounts.reloadWindow");
+        break;
       case "startLogin":
         await vscode.commands.executeCommand("codexAccounts.startLogin");
         break;
@@ -117,6 +121,7 @@ export class CodexAccountsSidebarProvider
       sharedHint:
         "Switches auth only. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
+      restart: state.restart,
       accounts: state.accounts.map((account) => ({
         id: account.record.id,
         label: getAccountLabel(account.record),
@@ -631,6 +636,26 @@ export class CodexAccountsSidebarProvider
         line-height: 1.5;
       }
 
+      .restart-banner {
+        border-radius: 18px;
+        border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
+        background: linear-gradient(180deg, var(--warning-soft), color-mix(in srgb, var(--panel) 92%, transparent));
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+        box-shadow: var(--shadow);
+      }
+
+      .restart-banner strong {
+        font-size: 13px;
+      }
+
+      .restart-banner-copy {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
       .empty {
         border-radius: 18px;
         border: 1px dashed var(--panel-border);
@@ -711,6 +736,9 @@ export class CodexAccountsSidebarProvider
         ].join("");
 
         const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+        const restartBanner = state.restart?.thisWindowNeedsReload
+          ? renderRestartBanner(state.restart)
+          : "";
         const currentAccount = accounts.find((account) => account.isActive) || null;
         const otherAccounts = currentAccount
           ? accounts.filter((account) => account.id !== currentAccount.id)
@@ -736,9 +764,31 @@ export class CodexAccountsSidebarProvider
               <div><strong>state_5.sqlite</strong> stays shared across accounts</div>
             </div>
           </section>
+          \${restartBanner}
           <section class="tools">\${tools}</section>
           \${state.lastError ? \`<section class="error">\${escapeHtml(state.lastError)}</section>\` : ""}
           <section class="list">\${accountMarkup}</section>
+        \`;
+      }
+
+      function renderRestartBanner(restart) {
+        const currentLabel = restart.currentWindowAccountLabel || "previous account";
+        const liveLabel = restart.liveAccountLabel || "new account";
+        return \`
+          <section class="restart-banner">
+            <div>
+              <strong>Reload needed in this window</strong>
+              <div class="restart-banner-copy">
+                This window is still using <strong>\${escapeHtml(currentLabel)}</strong>.
+                Live <code>auth.json</code> has already switched to <strong>\${escapeHtml(liveLabel)}</strong>.
+                \${restart.switchedAt ? \`Switched \${escapeHtml(formatWhen(restart.switchedAt))}.\` : ""}
+                Pending windows: \${escapeHtml(String(restart.pendingWindowCount || 1))}.
+              </div>
+            </div>
+            <div class="account-actions">
+              <button class="card-button" data-action="reloadWindow">Reload Window</button>
+            </div>
+          </section>
         \`;
       }
 
@@ -810,6 +860,7 @@ export class CodexAccountsSidebarProvider
               \${account.isActive
                 ? '<button class="card-button" disabled>Current account</button>'
                 : \`<button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch</button>\`}
+              \${state.restart?.thisWindowNeedsReload ? '<button class="card-button-secondary" data-action="reloadWindow">Reload window</button>' : ""}
               <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh usage</button>
               <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
               <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>

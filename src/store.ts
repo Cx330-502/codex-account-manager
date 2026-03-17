@@ -12,17 +12,23 @@ import type {
   CodexAuthFile,
   ExportBundle,
   ManagedAccount,
+  RuntimeState,
   SharedStateInfo,
+  SwitchMarker,
   UsageSnapshot,
+  WindowSessionRecord,
 } from "./types";
 
 const REGISTRY_VERSION = 1 as const;
+const RUNTIME_STATE_VERSION = 1 as const;
+const WINDOW_SESSION_STALE_MS = 2 * 60_000;
 
 export class CodexAccountStore {
   public readonly authPath: string;
   public readonly managerRoot: string;
   public readonly accountsRoot: string;
   public readonly registryPath: string;
+  public readonly runtimeStatePath: string;
   public readonly sessionsPath: string;
   public readonly memoriesPath: string;
   public readonly sqlitePath: string;
@@ -32,6 +38,7 @@ export class CodexAccountStore {
     this.managerRoot = path.join(this.codexHome, "account-manager");
     this.accountsRoot = path.join(this.managerRoot, "accounts");
     this.registryPath = path.join(this.managerRoot, "registry.json");
+    this.runtimeStatePath = path.join(this.managerRoot, "runtime.json");
     this.sessionsPath = path.join(this.codexHome, "sessions");
     this.memoriesPath = path.join(this.codexHome, "memories");
     this.sqlitePath = path.join(this.codexHome, "state_5.sqlite");
@@ -268,6 +275,45 @@ export class CodexAccountStore {
     });
   }
 
+  public async updateAccountAuth(id: string, auth: CodexAuthFile): Promise<void> {
+    await this.ensureReady();
+
+    const identity = deriveAccountIdentity(auth);
+    await this.writeJsonFile(this.getSnapshotPath(id), auth);
+
+    const currentAuth = await this.readCurrentAuth();
+    const currentFingerprint = currentAuth
+      ? deriveAccountIdentity(currentAuth).fingerprint
+      : null;
+    if (currentFingerprint === id) {
+      await this.writeJsonFile(this.authPath, auth);
+    }
+
+    const registry = await this.readRegistry();
+    const now = new Date().toISOString();
+    const nextAccounts = registry.accounts.map((record) => {
+      if (record.id !== id) {
+        return record;
+      }
+
+      return {
+        ...record,
+        updatedAt: now,
+        email: identity.email ?? record.email,
+        name: identity.name ?? record.name,
+        subject: identity.subject ?? record.subject,
+        accountId: identity.accountId ?? record.accountId,
+        chatgptAccountId: identity.chatgptAccountId ?? record.chatgptAccountId,
+        authMode: identity.authMode ?? record.authMode,
+      };
+    });
+
+    await this.writeRegistry({
+      version: REGISTRY_VERSION,
+      accounts: nextAccounts,
+    });
+  }
+
   public async exportBundle(targetPath: string): Promise<number> {
     const registry = await this.readRegistry();
     const accounts = [];
@@ -316,10 +362,109 @@ export class CodexAccountStore {
     return {
       codexHome: this.codexHome,
       authPath: this.authPath,
+      registryPath: this.registryPath,
+      runtimeStatePath: this.runtimeStatePath,
       sessionsPath: this.sessionsPath,
       memoriesPath: this.memoriesPath,
       sqlitePath: this.sqlitePath,
     };
+  }
+
+  public async getRuntimeState(): Promise<RuntimeState> {
+    const runtime = await this.readRuntimeState();
+    return runtime.state;
+  }
+
+  public async registerWindowSession(
+    windowId: string,
+    runtimeAccountId: string | null,
+  ): Promise<void> {
+    const { state } = await this.readRuntimeState();
+    const now = new Date().toISOString();
+    const generation = state.lastSwitch?.generation ?? 0;
+    const nextSession: WindowSessionRecord = {
+      id: windowId,
+      startedAt: now,
+      lastSeenAt: now,
+      runtimeAccountId,
+      acknowledgedSwitchGeneration: generation,
+    };
+    state.windowSessions = state.windowSessions.filter((session) => session.id !== windowId);
+    state.windowSessions.push(nextSession);
+    await this.writeRuntimeState(state);
+  }
+
+  public async heartbeatWindowSession(windowId: string): Promise<void> {
+    const { state } = await this.readRuntimeState();
+    const session = state.windowSessions.find((entry) => entry.id === windowId);
+    if (!session) {
+      return;
+    }
+
+    session.lastSeenAt = new Date().toISOString();
+    await this.writeRuntimeState(state);
+  }
+
+  public async removeWindowSession(windowId: string): Promise<void> {
+    const { state } = await this.readRuntimeState();
+    const nextSessions = state.windowSessions.filter((session) => session.id !== windowId);
+    if (nextSessions.length === state.windowSessions.length) {
+      return;
+    }
+    state.windowSessions = nextSessions;
+    await this.writeRuntimeState(state);
+  }
+
+  public async recordSwitch(
+    previousAccountId: string | null,
+    nextAccountId: string | null,
+  ): Promise<SwitchMarker> {
+    const { state } = await this.readRuntimeState();
+    const marker: SwitchMarker = {
+      generation: (state.lastSwitch?.generation ?? 0) + 1,
+      previousAccountId,
+      nextAccountId,
+      switchedAt: new Date().toISOString(),
+    };
+    state.lastSwitch = marker;
+    await this.writeRuntimeState(state);
+    return marker;
+  }
+
+  public async tryAcquireUsageRefreshLease(
+    windowId: string,
+    leaseMs: number,
+  ): Promise<boolean> {
+    const { state } = await this.readRuntimeState();
+    const nowMs = Date.now();
+    const activeLease = state.usageRefreshLease;
+    if (activeLease) {
+      const expiresAtMs = Date.parse(activeLease.expiresAt);
+      if (
+        activeLease.ownerWindowId !== windowId &&
+        Number.isFinite(expiresAtMs) &&
+        expiresAtMs > nowMs
+      ) {
+        return false;
+      }
+    }
+
+    state.usageRefreshLease = {
+      ownerWindowId: windowId,
+      acquiredAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(nowMs + leaseMs).toISOString(),
+    };
+    await this.writeRuntimeState(state);
+    return true;
+  }
+
+  public async releaseUsageRefreshLease(windowId: string): Promise<void> {
+    const { state } = await this.readRuntimeState();
+    if (state.usageRefreshLease?.ownerWindowId !== windowId) {
+      return;
+    }
+    state.usageRefreshLease = null;
+    await this.writeRuntimeState(state);
   }
 
   private async readRegistry(): Promise<AccountRegistry> {
@@ -350,6 +495,60 @@ export class CodexAccountStore {
 
   private getSnapshotPath(id: string): string {
     return path.join(this.accountsRoot, `${id}.json`);
+  }
+
+  private async readRuntimeState(): Promise<{
+    state: RuntimeState;
+  }> {
+    const runtime = await this.readJsonFile<RuntimeState>(this.runtimeStatePath);
+    const normalizedState = this.normalizeRuntimeState(runtime);
+    return {
+      state: normalizedState,
+    };
+  }
+
+  private normalizeRuntimeState(runtime: RuntimeState | null): RuntimeState {
+    const baseState: RuntimeState =
+      runtime &&
+      runtime.version === RUNTIME_STATE_VERSION &&
+      Array.isArray(runtime.windowSessions)
+        ? runtime
+        : {
+            version: RUNTIME_STATE_VERSION,
+            lastSwitch: null,
+            windowSessions: [],
+            usageRefreshLease: null,
+          };
+
+    const nowMs = Date.now();
+    const windowSessions = baseState.windowSessions.filter((session) => {
+      const lastSeenAtMs = Date.parse(session.lastSeenAt);
+      return Number.isFinite(lastSeenAtMs) && nowMs - lastSeenAtMs <= WINDOW_SESSION_STALE_MS;
+    });
+
+    const lease = baseState.usageRefreshLease;
+    const leaseExpiresAtMs = lease ? Date.parse(lease.expiresAt) : NaN;
+
+    return {
+      version: RUNTIME_STATE_VERSION,
+      lastSwitch: baseState.lastSwitch ?? null,
+      windowSessions,
+      usageRefreshLease:
+        lease && Number.isFinite(leaseExpiresAtMs) && leaseExpiresAtMs > nowMs
+          ? lease
+          : null,
+    };
+  }
+
+  private async writeRuntimeState(runtime: RuntimeState): Promise<void> {
+    const sortedSessions = [...runtime.windowSessions].sort((left, right) => {
+      return left.startedAt.localeCompare(right.startedAt);
+    });
+    await this.writeJsonFile(this.runtimeStatePath, {
+      ...runtime,
+      version: RUNTIME_STATE_VERSION,
+      windowSessions: sortedSessions,
+    });
   }
 
   private async readJsonFile<T>(filePath: string): Promise<T | null> {
