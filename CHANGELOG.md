@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.1] - 2026-03-17
+
+- Fixed `Start New Login` so it now saves the current snapshot first, then starts a clean `codex logout` + `codex login` flow instead of reusing the old live auth state.
+- Changed reload detection to compare each window's runtime account with the actual live `~/.codex/auth.json`, so login-driven auth changes now surface the same reload warning as account switching.
+- Added `Revert auth.json` actions in the sidebar and status bar when the current window and live auth diverge.
+- Changed manual `Refresh Usage` so it bypasses the configured cooldown; `codexAccounts.usageRefreshMinIntervalMinutes` now only throttles background auto-refresh.
+
 ## [0.2.0] - 2026-03-17
 
 - Added startup activation so the status bar appears without opening the sidebar first.

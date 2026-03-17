@@ -9,6 +9,7 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private item: vscode.StatusBarItem | undefined;
   private restartItem: vscode.StatusBarItem | undefined;
+  private revertItem: vscode.StatusBarItem | undefined;
 
   public constructor(private readonly controller: CodexAccountsController) {
     this.createStatusBarItem();
@@ -33,6 +34,8 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     this.item = undefined;
     this.restartItem?.dispose();
     this.restartItem = undefined;
+    this.revertItem?.dispose();
+    this.revertItem = undefined;
   }
 
   public render(state: ControllerState): void {
@@ -66,20 +69,26 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     this.restartItem = vscode.window.createStatusBarItem(getAlignment(), 121);
     this.restartItem.command = "codexAccounts.reloadWindow";
     this.restartItem.name = "Codex Accounts Restart";
+
+    this.revertItem?.dispose();
+    this.revertItem = vscode.window.createStatusBarItem(getAlignment(), 122);
+    this.revertItem.name = "Codex Accounts Revert";
   }
 
   private renderRestartState(state: ControllerState): void {
-    if (!this.restartItem) {
+    if (!this.restartItem || !this.revertItem) {
       return;
     }
 
     if (!state.restart.thisWindowNeedsReload) {
       this.restartItem.hide();
+      this.revertItem.hide();
       return;
     }
 
-    const currentLabel = state.restart.currentWindowAccountLabel ?? "previous account";
-    const liveLabel = state.restart.liveAccountLabel ?? "new account";
+    const currentLabel =
+      state.restart.currentWindowAccountLabel ?? "current window account";
+    const liveLabel = state.restart.liveAccountLabel ?? "different live auth";
     this.restartItem.text = `$(warning) Reload: ${currentLabel} -> ${liveLabel}`;
     this.restartItem.tooltip =
       `This window still uses ${currentLabel} until reload.\n` +
@@ -87,6 +96,25 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
       `Pending windows: ${state.restart.pendingWindowCount}\n` +
       "Click to reload this VS Code window.";
     this.restartItem.show();
+
+    if (
+      state.restart.canRevertToWindowAccount &&
+      state.restart.currentWindowAccountId
+    ) {
+      this.revertItem.text = `$(history) Revert -> ${currentLabel}`;
+      this.revertItem.tooltip =
+        `Write auth.json back to ${currentLabel} without reloading this window.\n` +
+        `Current live auth: ${liveLabel}.`;
+      this.revertItem.command = {
+        title: "Revert to Current Window Account",
+        command: "codexAccounts.switchAccount",
+        arguments: [state.restart.currentWindowAccountId],
+      };
+      this.revertItem.show();
+      return;
+    }
+
+    this.revertItem.hide();
   }
 }
 
@@ -126,10 +154,10 @@ function buildTooltip(active: ManagedAccount, state: ControllerState): string {
   ];
   if (state.restart.thisWindowNeedsReload) {
     lines.push(
-      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the previous account"}.`,
+      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
     );
     lines.push(
-      `Live auth switched to ${state.restart.liveAccountLabel ?? "the new account"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
+      `Live auth now points to ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
     );
   }
   const usage = active.record.usage;

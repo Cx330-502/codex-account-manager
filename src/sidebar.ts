@@ -772,8 +772,13 @@ export class CodexAccountsSidebarProvider
       }
 
       function renderRestartBanner(restart) {
-        const currentLabel = restart.currentWindowAccountLabel || "previous account";
-        const liveLabel = restart.liveAccountLabel || "new account";
+        const currentLabel =
+          restart.currentWindowAccountLabel || "current window account";
+        const liveLabel = restart.liveAccountLabel || "different live auth";
+        const revertButton =
+          restart.canRevertToWindowAccount && restart.currentWindowAccountId
+            ? \`<button class="card-button-secondary" data-action="switchAccount" data-id="\${escapeAttr(restart.currentWindowAccountId)}">Revert auth.json</button>\`
+            : "";
         return \`
           <section class="restart-banner">
             <div>
@@ -787,6 +792,7 @@ export class CodexAccountsSidebarProvider
             </div>
             <div class="account-actions">
               <button class="card-button" data-action="reloadWindow">Reload Window</button>
+              \${revertButton}
             </div>
           </section>
         \`;
@@ -861,6 +867,9 @@ export class CodexAccountsSidebarProvider
                 ? '<button class="card-button" disabled>Current account</button>'
                 : \`<button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch</button>\`}
               \${state.restart?.thisWindowNeedsReload ? '<button class="card-button-secondary" data-action="reloadWindow">Reload window</button>' : ""}
+              \${state.restart?.canRevertToWindowAccount && state.restart?.currentWindowAccountId
+                ? \`<button class="card-button-secondary" data-action="switchAccount" data-id="\${escapeAttr(state.restart.currentWindowAccountId)}">Revert auth.json</button>\`
+                : ""}
               <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh usage</button>
               <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
               <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>

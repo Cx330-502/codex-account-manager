@@ -4,10 +4,15 @@ import { randomUUID } from "node:crypto";
 
 import * as vscode from "vscode";
 
-import { getAccountLabel, quoteForShell } from "./auth";
+import {
+  deriveAccountIdentity,
+  getAccountLabel,
+  quoteForShell,
+} from "./auth";
 import { CodexAccountStore } from "./store";
 import type {
   AccountRecord,
+  CodexAuthFile,
   ManagedAccount,
   RuntimeState,
   SharedStateInfo,
@@ -27,6 +32,7 @@ interface RefreshUsageOptions {
 
 export interface RestartState {
   thisWindowNeedsReload: boolean;
+  canRevertToWindowAccount: boolean;
   currentWindowAccountId: string | null;
   currentWindowAccountLabel: string | null;
   liveAccountId: string | null;
@@ -74,9 +80,9 @@ export class CodexAccountsController implements vscode.Disposable {
   public async initialize(): Promise<void> {
     await this.store.ensureReady();
     const accounts = await this.store.listAccounts();
-    const activeAccountId =
-      accounts.find((account) => account.isActive)?.record.id ?? null;
-    await this.store.registerWindowSession(this.windowId, activeAccountId);
+    const currentAuth = await this.store.readCurrentAuth();
+    const liveAuthState = describeLiveAuth(accounts, currentAuth);
+    await this.store.registerWindowSession(this.windowId, liveAuthState.accountId);
     await this.refresh(false);
     this.startWatchingFiles();
     this.startIntervals();
@@ -106,11 +112,13 @@ export class CodexAccountsController implements vscode.Disposable {
   public async refresh(triggerUsage: boolean | undefined = undefined): Promise<void> {
     try {
       const accounts = await this.store.listAccounts();
+      const currentAuth = await this.store.readCurrentAuth();
       const runtime = await this.store.getRuntimeState();
+      const liveAuthState = describeLiveAuth(accounts, currentAuth);
       this.updateState({
         accounts,
         sharedState: this.store.getSharedStateInfo(),
-        restart: this.buildRestartState(accounts, runtime),
+        restart: this.buildRestartState(accounts, runtime, liveAuthState),
         lastError: null,
       });
 
@@ -248,18 +256,20 @@ export class CodexAccountsController implements vscode.Disposable {
   }
 
   public async startLogin(): Promise<void> {
-    await this.store.captureCurrentAuth("manual");
-
-    const commandLine = `${quoteForShell(this.resolveCodexBinary())} login`;
+    const currentRecord = await this.store.captureCurrentAuth("manual");
+    const codexBinary = quoteForShell(this.resolveCodexBinary());
     const terminal = vscode.window.createTerminal({
       name: "Codex Login",
       cwd: this.store.codexHome,
     });
     terminal.show(true);
-    terminal.sendText(commandLine, true);
+    terminal.sendText(`${codexBinary} logout`, true);
+    terminal.sendText(`${codexBinary} login`, true);
 
     vscode.window.showInformationMessage(
-      "After the new login updates ~/.codex/auth.json, this extension will auto-capture it.",
+      currentRecord
+        ? `Saved ${getAccountLabel(currentRecord)} first, then started a clean Codex login. After the new login updates ~/.codex/auth.json, this extension will auto-capture it.`
+        : "Started a clean Codex login. After the new login updates ~/.codex/auth.json, this extension will auto-capture it.",
     );
   }
 
@@ -286,9 +296,12 @@ export class CodexAccountsController implements vscode.Disposable {
     const targetAccounts = targetId
       ? accounts.filter((account) => account.record.id === targetId)
       : accounts;
-    const minIntervalMinutes = getUsageRefreshMinIntervalMinutes();
+    const isBackgroundRefresh = (options.reason ?? "manual") === "background";
+    const minIntervalMinutes = isBackgroundRefresh
+      ? getUsageRefreshMinIntervalMinutes()
+      : 0;
     const minIntervalMs = minIntervalMinutes * 60_000;
-    const shouldNotify = (options.reason ?? "manual") !== "background";
+    const shouldNotify = !isBackgroundRefresh;
     let refreshedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
@@ -548,27 +561,32 @@ export class CodexAccountsController implements vscode.Disposable {
   private buildRestartState(
     accounts: ManagedAccount[],
     runtime: RuntimeState,
+    liveAuthState: LiveAuthState,
   ): RestartState {
-    const activeAccount = accounts.find((account) => account.isActive) ?? null;
-    const activeAccountId = activeAccount?.record.id ?? runtime.lastSwitch?.nextAccountId ?? null;
     const session = runtime.windowSessions.find((entry) => entry.id === this.windowId) ?? null;
-    const currentGeneration = runtime.lastSwitch?.generation ?? 0;
-    const thisWindowNeedsReload = Boolean(
-      session && session.acknowledgedSwitchGeneration < currentGeneration,
-    );
-    const currentWindowAccountId = thisWindowNeedsReload
-      ? session?.runtimeAccountId ?? null
-      : activeAccountId;
+    const currentWindowAccountId =
+      session?.runtimeAccountId ?? liveAuthState.accountId;
+    const thisWindowNeedsReload =
+      session != null && session.runtimeAccountId !== liveAuthState.accountId;
+    const canRevertToWindowAccount =
+      thisWindowNeedsReload &&
+      currentWindowAccountId != null &&
+      accounts.some((account) => account.record.id === currentWindowAccountId);
+    const switchedAt =
+      runtime.lastSwitch?.nextAccountId === liveAuthState.accountId
+        ? runtime.lastSwitch?.switchedAt ?? null
+        : null;
 
     return {
       thisWindowNeedsReload,
+      canRevertToWindowAccount,
       currentWindowAccountId,
       currentWindowAccountLabel: getAccountLabelById(accounts, currentWindowAccountId),
-      liveAccountId: activeAccountId,
-      liveAccountLabel: getAccountLabelById(accounts, activeAccountId),
-      switchedAt: runtime.lastSwitch?.switchedAt ?? null,
+      liveAccountId: liveAuthState.accountId,
+      liveAccountLabel: liveAuthState.label,
+      switchedAt,
       pendingWindowCount: runtime.windowSessions.filter(
-        (entry) => entry.acknowledgedSwitchGeneration < currentGeneration,
+        (entry) => entry.runtimeAccountId !== liveAuthState.accountId,
       ).length,
     };
   }
@@ -629,6 +647,7 @@ function mapArch(arch: string): "aarch64" | "x86_64" | null {
 function emptyRestartState(): RestartState {
   return {
     thisWindowNeedsReload: false,
+    canRevertToWindowAccount: false,
     currentWindowAccountId: null,
     currentWindowAccountLabel: null,
     liveAccountId: null,
@@ -647,6 +666,37 @@ function getAccountLabelById(
   }
   const matchedAccount = accounts.find((account) => account.record.id === accountId);
   return matchedAccount ? getAccountLabel(matchedAccount.record) : accountId;
+}
+
+interface LiveAuthState {
+  accountId: string | null;
+  label: string | null;
+}
+
+function describeLiveAuth(
+  accounts: ManagedAccount[],
+  auth: CodexAuthFile | null,
+): LiveAuthState {
+  if (!auth) {
+    return {
+      accountId: null,
+      label: "signed-out auth",
+    };
+  }
+
+  const identity = deriveAccountIdentity(auth);
+  const managedLabel = getAccountLabelById(accounts, identity.fingerprint);
+  return {
+    accountId: identity.fingerprint,
+    label:
+      managedLabel ??
+      identity.email ??
+      identity.name ??
+      identity.chatgptAccountId ??
+      identity.accountId ??
+      identity.subject ??
+      "unmanaged auth",
+  };
 }
 
 function toErrorMessage(error: unknown): string {
