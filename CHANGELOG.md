@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.3] - 2026-03-19
+
+- Improved `Refresh Usage` failure diagnostics by classifying failures into token, network, and service-side errors.
+- Added a `Reload Window` action suggestion for network-related refresh failures.
+- Clarified manual refresh warning messages so users can quickly tell whether they should re-login or retry later.
+
 ## [0.2.2] - 2026-03-17
 
 - Fixed account fingerprinting for team/workspace-shared environments by preferring user-scoped claims like `email` and `sub` over shared workspace ids, so distinct accounts no longer collapse into one managed snapshot.
