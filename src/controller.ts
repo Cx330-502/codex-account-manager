@@ -30,6 +30,8 @@ interface RefreshUsageOptions {
   reason?: "manual" | "background";
 }
 
+type UsageFailureKind = "token" | "network" | "service" | "other";
+
 export interface RestartState {
   thisWindowNeedsReload: boolean;
   canRevertToWindowAccount: boolean;
@@ -307,6 +309,7 @@ export class CodexAccountsController implements vscode.Disposable {
     let failedCount = 0;
     let firstSkippedAccount: ManagedAccount | null = null;
     let firstFailureMessage: string | null = null;
+    let firstFailureKind: UsageFailureKind | null = null;
 
     for (const account of targetAccounts) {
       if (shouldSkipUsageRefresh(account.record, minIntervalMs)) {
@@ -323,9 +326,11 @@ export class CodexAccountsController implements vscode.Disposable {
         await this.store.setUsage(account.record.id, result.usage, null);
         refreshedCount += 1;
       } catch (error) {
-        await this.store.setUsage(account.record.id, undefined, toErrorMessage(error));
+        const errorMessage = toErrorMessage(error);
+        await this.store.setUsage(account.record.id, undefined, errorMessage);
         failedCount += 1;
-        firstFailureMessage ??= toErrorMessage(error);
+        firstFailureMessage ??= errorMessage;
+        firstFailureKind ??= classifyUsageFailure(errorMessage);
       }
     }
 
@@ -340,9 +345,23 @@ export class CodexAccountsController implements vscode.Disposable {
         targetAccounts.length === 1
           ? ` for ${getAccountLabel(targetAccounts[0].record)}`
           : "";
-      vscode.window.showWarningMessage(
-        `Usage refresh failed${failureTarget}: ${firstFailureMessage ?? "unknown error"}`,
+      const failureMessage = formatUsageFailureMessage(
+        firstFailureKind,
+        firstFailureMessage,
       );
+      if (firstFailureKind === "network") {
+        const decision = await vscode.window.showWarningMessage(
+          `Usage refresh failed${failureTarget}: ${failureMessage}`,
+          "Reload Window",
+        );
+        if (decision === "Reload Window") {
+          await vscode.commands.executeCommand("workbench.action.reloadWindow");
+        }
+      } else {
+        vscode.window.showWarningMessage(
+          `Usage refresh failed${failureTarget}: ${failureMessage}`,
+        );
+      }
       return;
     }
 
@@ -701,6 +720,81 @@ function describeLiveAuth(
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function classifyUsageFailure(message: string): UsageFailureKind {
+  const normalized = message.toLowerCase();
+  const httpCodes = extractHttpStatusCodes(normalized);
+  if (httpCodes.some((code) => code === 401 || code === 403)) {
+    return "token";
+  }
+  if (httpCodes.some((code) => code === 502 || code === 503 || code === 504)) {
+    return "network";
+  }
+  if (
+    httpCodes.some(
+      (code) => code === 408 || code === 425 || code === 429 || (code >= 500 && code <= 599),
+    )
+  ) {
+    return "service";
+  }
+
+  if (
+    normalized.includes("refresh token") ||
+    normalized.includes("access token") ||
+    normalized.includes("token refresh") ||
+    normalized.includes("please run `codex login` again")
+  ) {
+    return "token";
+  }
+
+  if (
+    normalized.includes("fetch failed") ||
+    normalized.includes("unable to fetch usage") ||
+    normalized.includes("timed out") ||
+    normalized.includes("timeout") ||
+    normalized.includes("econn") ||
+    normalized.includes("enotfound") ||
+    normalized.includes("eai_again") ||
+    normalized.includes("socket") ||
+    normalized.includes("network") ||
+    normalized.includes("tls") ||
+    normalized.includes("ssl") ||
+    normalized.includes("could not resolve host") ||
+    normalized.includes("failed to connect")
+  ) {
+    return "network";
+  }
+
+  return "other";
+}
+
+function formatUsageFailureMessage(
+  kind: UsageFailureKind | null,
+  rawMessage: string | null,
+): string {
+  switch (kind) {
+    case "token":
+      return `token expired or invalid. ${rawMessage ?? "Please run codex login again."}`;
+    case "network":
+      return `network request failed. ${rawMessage ?? "Please check network and try again. You can also reload this window."}`;
+    case "service":
+      return `OpenAI service is temporarily unavailable or rate-limited. ${rawMessage ?? "Please wait and retry."}`;
+    default:
+      return rawMessage ?? "unknown error";
+  }
+}
+
+function extractHttpStatusCodes(message: string): number[] {
+  const matches = message.match(/\bhttp\s+(\d{3})\b/gi) ?? [];
+  const codes: number[] = [];
+  for (const item of matches) {
+    const parsed = Number.parseInt(item.replace(/[^0-9]/g, ""), 10);
+    if (Number.isFinite(parsed)) {
+      codes.push(parsed);
+    }
+  }
+  return codes;
 }
 
 function getUsageRefreshMinIntervalMinutes(): number {
