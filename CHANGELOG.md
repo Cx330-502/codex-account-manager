@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.5] - 2026-03-24
+
+- Fixed the sidebar's initial webview state handshake so the first open no longer intermittently renders empty until `Refresh All` is clicked.
+
 ## [0.2.4] - 2026-03-24
 
 - Added per-account `Re-login replace` flow: re-login now replaces the selected managed entry instead of creating a new snapshot first.

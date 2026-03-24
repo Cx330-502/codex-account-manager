@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",

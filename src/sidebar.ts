@@ -8,6 +8,7 @@ import { CodexAccountsController } from "./controller";
 import { toUsageFailureInfo } from "./usageFailure";
 
 type SidebarMessage =
+  | { type: "ready" }
   | { type: "refresh" }
   | { type: "saveCurrentAccount" }
   | { type: "importBundle" }
@@ -26,6 +27,7 @@ export class CodexAccountsSidebarProvider
 {
   private readonly disposables: vscode.Disposable[] = [];
   private view: vscode.WebviewView | undefined;
+  private webviewReady = false;
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
@@ -47,6 +49,7 @@ export class CodexAccountsSidebarProvider
     webviewView: vscode.WebviewView,
   ): void | Thenable<void> {
     this.view = webviewView;
+    this.webviewReady = false;
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this.extensionUri],
@@ -64,6 +67,10 @@ export class CodexAccountsSidebarProvider
 
   private async handleMessage(message: SidebarMessage): Promise<void> {
     switch (message.type) {
+      case "ready":
+        this.webviewReady = true;
+        await this.postState();
+        break;
       case "refresh":
         await vscode.commands.executeCommand("codexAccounts.refresh");
         break;
@@ -112,7 +119,7 @@ export class CodexAccountsSidebarProvider
   }
 
   private async postState(): Promise<void> {
-    if (!this.view) {
+    if (!this.view || !this.webviewReady) {
       return;
     }
 
@@ -741,6 +748,8 @@ export class CodexAccountsSidebarProvider
           render();
         }
       });
+
+      vscode.postMessage({ type: "ready" });
 
       document.addEventListener("click", (event) => {
         const target = event.target.closest("[data-action]");
