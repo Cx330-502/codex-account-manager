@@ -52,7 +52,10 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const AUTO_REFRESH_TICK_MS = 60_000;
 const AUTO_REFRESH_LEASE_MS = 2 * 60_000;
 const AUTO_REFRESH_BETWEEN_ACCOUNT_DELAY_MS = 350;
-const AUTO_REFRESH_RETRY_DELAY_MS = 1_000;
+const AUTO_REFRESH_RETRY_DELAY_MS = 15_000;
+const BACKGROUND_REFRESH_MAX_ATTEMPTS = 3;
+const BACKGROUND_FAILURE_REPORT_THRESHOLD = 5;
+const REFRESH_RECOVERY_DELAY_MS = 1_000;
 
 export class CodexAccountsController implements vscode.Disposable {
   private readonly onDidChangeStateEmitter = new vscode.EventEmitter<ControllerState>();
@@ -62,9 +65,11 @@ export class CodexAccountsController implements vscode.Disposable {
 
   private watchDebounce: NodeJS.Timeout | undefined;
   private registryWatchDebounce: NodeJS.Timeout | undefined;
+  private refreshRecoveryTimer: NodeJS.Timeout | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private autoRefreshTimer: NodeJS.Timeout | undefined;
   private backgroundUsageRefreshInFlight = false;
+  private readonly backgroundFailureCounts = new Map<string, number>();
   private disposed = false;
   private pendingReloginAccountId: string | null = null;
   private state: ControllerState;
@@ -107,6 +112,9 @@ export class CodexAccountsController implements vscode.Disposable {
     if (this.registryWatchDebounce) {
       clearTimeout(this.registryWatchDebounce);
     }
+    if (this.refreshRecoveryTimer) {
+      clearTimeout(this.refreshRecoveryTimer);
+    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
     }
@@ -131,6 +139,10 @@ export class CodexAccountsController implements vscode.Disposable {
         restart: this.buildRestartState(accounts, runtime, liveAuthState),
         lastError: null,
       });
+      if (this.refreshRecoveryTimer) {
+        clearTimeout(this.refreshRecoveryTimer);
+        this.refreshRecoveryTimer = undefined;
+      }
 
       const shouldTriggerUsage =
         triggerUsage ??
@@ -143,10 +155,11 @@ export class CodexAccountsController implements vscode.Disposable {
         });
       }
     } catch (error) {
+      this.scheduleRefreshRecovery();
       this.updateState({
-        accounts: [],
+        accounts: this.state.accounts,
         sharedState: this.store.getSharedStateInfo(),
-        restart: emptyRestartState(),
+        restart: this.state.restart,
         lastError: toErrorMessage(error),
       });
     }
@@ -361,6 +374,7 @@ export class CodexAccountsController implements vscode.Disposable {
           account.auth,
           isBackgroundRefresh,
         );
+        this.backgroundFailureCounts.delete(account.record.id);
         if (result.authRefreshed) {
           await this.store.updateAccountAuth(account.record.id, result.auth);
         }
@@ -368,11 +382,17 @@ export class CodexAccountsController implements vscode.Disposable {
         refreshedCount += 1;
       } catch (error) {
         const errorMessage = toErrorMessage(error);
-        await this.store.setUsage(
-          account.record.id,
-          undefined,
-          encodeUsageFailure(errorMessage),
-        );
+        const shouldPersistFailure =
+          !isBackgroundRefresh ||
+          this.bumpBackgroundFailureCount(account.record.id) >=
+            BACKGROUND_FAILURE_REPORT_THRESHOLD;
+        if (shouldPersistFailure) {
+          await this.store.setUsage(
+            account.record.id,
+            undefined,
+            encodeUsageFailure(errorMessage),
+          );
+        }
         failedCount += 1;
         firstFailureMessage ??= errorMessage;
         firstFailureKind ??= toUsageFailureInfo(errorMessage).kind;
@@ -544,7 +564,7 @@ export class CodexAccountsController implements vscode.Disposable {
     auth: CodexAuthFile,
     isBackgroundRefresh: boolean,
   ): Promise<UsageFetchResult> {
-    const maxAttempts = isBackgroundRefresh ? 2 : 1;
+    const maxAttempts = isBackgroundRefresh ? BACKGROUND_REFRESH_MAX_ATTEMPTS : 1;
     let attempt = 0;
     let lastError: unknown;
     while (attempt < maxAttempts) {
@@ -567,6 +587,12 @@ export class CodexAccountsController implements vscode.Disposable {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
+  private bumpBackgroundFailureCount(accountId: string): number {
+    const nextCount = (this.backgroundFailureCounts.get(accountId) ?? 0) + 1;
+    this.backgroundFailureCounts.set(accountId, nextCount);
+    return nextCount;
+  }
+
   private scheduleRegistryRefresh(): void {
     if (this.registryWatchDebounce) {
       clearTimeout(this.registryWatchDebounce);
@@ -574,6 +600,19 @@ export class CodexAccountsController implements vscode.Disposable {
     this.registryWatchDebounce = setTimeout(() => {
       void this.refresh(false);
     }, 250);
+  }
+
+  private scheduleRefreshRecovery(): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.refreshRecoveryTimer) {
+      return;
+    }
+    this.refreshRecoveryTimer = setTimeout(() => {
+      this.refreshRecoveryTimer = undefined;
+      void this.refresh(false);
+    }, REFRESH_RECOVERY_DELAY_MS);
   }
 
   private async runAutoRefreshTick(): Promise<void> {

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.6] - 2026-03-24
+
+- Fixed post-reload account visibility by preserving the last good sidebar state when a startup refresh fails and scheduling automatic refresh recovery retries.
+- Tuned background usage refresh behavior: network/service retries now wait longer between attempts, and transient failures are only surfaced after repeated consecutive background failures.
+- Added repository TODO tracking for cross-environment auth/refresh stability, CLI productization, and mixed WSL/SSH investigation tasks.
+
 ## [0.2.5] - 2026-03-24
 
 - Fixed the sidebar's initial webview state handshake so the first open no longer intermittently renders empty until `Refresh All` is clicked.
