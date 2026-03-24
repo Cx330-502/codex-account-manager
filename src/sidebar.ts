@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import { getAccountLabel } from "./auth";
 import type { ControllerState } from "./controller";
 import { CodexAccountsController } from "./controller";
+import type { ManagedAccount, UsageWindowSummary } from "./types";
 import { toUsageFailureInfo } from "./usageFailure";
 
 type SidebarMessage =
@@ -36,6 +37,11 @@ export class CodexAccountsSidebarProvider
     this.disposables.push(
       this.controller.onDidChangeState(() => {
         void this.postState();
+      }),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration("codexAccounts.sidebarSortOrder")) {
+          void this.postState();
+        }
       }),
     );
   }
@@ -130,6 +136,11 @@ export class CodexAccountsSidebarProvider
   }
 
   private toViewState(state: ControllerState): unknown {
+    const accounts = sortSidebarAccounts(
+      state.accounts,
+      getSidebarSortOrder(),
+    );
+
     return {
       generatedAt: new Date().toISOString(),
       lastError: state.lastError,
@@ -137,7 +148,7 @@ export class CodexAccountsSidebarProvider
         "Switches auth only. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
       restart: state.restart,
-      accounts: state.accounts.map((account) => {
+      accounts: accounts.map((account) => {
         const usageFailure = account.record.usageError
           ? toUsageFailureInfo(account.record.usageError)
           : null;
@@ -1260,6 +1271,134 @@ export class CodexAccountsSidebarProvider
   </body>
 </html>`;
   }
+}
+
+type SidebarSortOrder =
+  | "default"
+  | "fiveHourResetAsc"
+  | "fiveHourResetDesc"
+  | "weeklyResetAsc"
+  | "weeklyResetDesc"
+  | "fiveHourRemainingAsc"
+  | "fiveHourRemainingDesc"
+  | "weeklyRemainingAsc"
+  | "weeklyRemainingDesc";
+
+function getSidebarSortOrder(): SidebarSortOrder {
+  const value = vscode.workspace
+    .getConfiguration("codexAccounts")
+    .get<string>("sidebarSortOrder", "default");
+
+  switch (value) {
+    case "fiveHourResetAsc":
+    case "fiveHourResetDesc":
+    case "weeklyResetAsc":
+    case "weeklyResetDesc":
+    case "fiveHourRemainingAsc":
+    case "fiveHourRemainingDesc":
+    case "weeklyRemainingAsc":
+    case "weeklyRemainingDesc":
+      return value;
+    default:
+      return "default";
+  }
+}
+
+function sortSidebarAccounts(
+  accounts: ManagedAccount[],
+  sortOrder: SidebarSortOrder,
+): ManagedAccount[] {
+  const sorted = [...accounts];
+  if (sortOrder === "default") {
+    return sorted;
+  }
+
+  sorted.sort((left, right) => {
+    const comparison = compareSortMetric(left, right, sortOrder);
+    if (comparison !== 0) {
+      return comparison;
+    }
+
+    if (left.isActive !== right.isActive) {
+      return left.isActive ? -1 : 1;
+    }
+
+    const leftSortKey = left.record.lastUsedAt ?? left.record.updatedAt;
+    const rightSortKey = right.record.lastUsedAt ?? right.record.updatedAt;
+    const recencyComparison = rightSortKey.localeCompare(leftSortKey);
+    if (recencyComparison !== 0) {
+      return recencyComparison;
+    }
+
+    return getAccountLabel(left.record).localeCompare(getAccountLabel(right.record));
+  });
+
+  return sorted;
+}
+
+function compareSortMetric(
+  left: ManagedAccount,
+  right: ManagedAccount,
+  sortOrder: Exclude<SidebarSortOrder, "default">,
+): number {
+  const direction = sortOrder.endsWith("Asc") ? 1 : -1;
+  const leftMetric = getSortMetricValue(left, sortOrder);
+  const rightMetric = getSortMetricValue(right, sortOrder);
+
+  if (leftMetric == null && rightMetric == null) {
+    return 0;
+  }
+  if (leftMetric == null) {
+    return 1;
+  }
+  if (rightMetric == null) {
+    return -1;
+  }
+
+  return (leftMetric - rightMetric) * direction;
+}
+
+function getSortMetricValue(
+  account: ManagedAccount,
+  sortOrder: Exclude<SidebarSortOrder, "default">,
+): number | null {
+  if (sortOrder.startsWith("fiveHour")) {
+    return sortOrder.includes("Reset")
+      ? getWindowResetTimestamp(account, "5h")
+      : getWindowRemainingPercent(account, "5h");
+  }
+
+  return sortOrder.includes("Reset")
+    ? getWindowResetTimestamp(account, "1w")
+    : getWindowRemainingPercent(account, "1w");
+}
+
+function getWindowResetTimestamp(
+  account: ManagedAccount,
+  key: UsageWindowSummary["key"],
+): number | null {
+  const resetsAt = findWindow(account, key)?.resetsAt;
+  if (!resetsAt) {
+    return null;
+  }
+
+  const timestamp = Date.parse(resetsAt);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getWindowRemainingPercent(
+  account: ManagedAccount,
+  key: UsageWindowSummary["key"],
+): number | null {
+  const remaining = findWindow(account, key)?.remainingPercent;
+  return typeof remaining === "number" ? remaining : null;
+}
+
+function findWindow(
+  account: ManagedAccount,
+  key: UsageWindowSummary["key"],
+): UsageWindowSummary | undefined {
+  return account.record.usage?.windows.find((window) => window.key === key);
 }
 
 function createNonce(): string {

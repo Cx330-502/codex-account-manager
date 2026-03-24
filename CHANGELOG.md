@@ -6,6 +6,7 @@ The format is based on Keep a Changelog.
 
 ## [0.2.6] - 2026-03-24
 
+- Added configurable sidebar account sorting by `5h`/`1w` reset time and remaining quota, with ascending and descending modes.
 - Fixed post-reload account visibility by preserving the last good sidebar state when a startup refresh fails and scheduling automatic refresh recovery retries.
 - Tuned background usage refresh behavior: network/service retries now wait longer between attempts, and transient failures are only surfaced after repeated consecutive background failures.
 - Added repository TODO tracking for cross-environment auth/refresh stability, CLI productization, and mixed WSL/SSH investigation tasks.

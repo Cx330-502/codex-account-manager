@@ -15,6 +15,7 @@
 - 一键切换账号：把选中的快照写回 `~/.codex/auth.json`
 - 一键导入 / 导出：导出为单个 JSON bundle，方便跨平台迁移
 - 使用额度展示：按官方 Codex 扩展的接口规则，展示 `5h` 和 `1周` 两层额度
+- 侧边栏排序可配置：支持按 `5h / 1周` 重置时间、`5h / 1周` 剩余额度做升序 / 降序排序
 - usage 后台刷新：窗口开着时自动按间隔刷新 usage，并在多窗口之间共享刷新结果
 - 手动刷新不受冷却：点击 `Refresh Usage` 会立刻请求；`codexAccounts.usageRefreshMinIntervalMinutes` 只约束自动刷新
 - 自动续 token：usage 刷新前会尽量自动续 `refresh_token`；若自动续失败，会明确展示错误
@@ -44,6 +45,7 @@
   - 服务端响应时间（Server）
   - 两层额度的重置时刻（Reset time）
 - 默认有 10 分钟自动刷新冷却；窗口保持打开时会自动刷新，可在设置中改 `codexAccounts.usageRefreshMinIntervalMinutes`
+- 侧边栏账号顺序可通过 `codexAccounts.sidebarSortOrder` 配置
 - 手动点击 `Refresh Usage` 时不会受这个冷却限制
 - 多个 VS Code 窗口会共享 refresh 结果，并尽量避免重复打接口
 - 对带 `refresh_token` 的账号，会优先尝试自动续 token；如果自动续失败，会把失败原因显示在状态栏 / 侧边栏中

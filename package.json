@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -228,6 +228,33 @@
           ],
           "default": "right",
           "description": "Where to place the Codex Accounts status item in the VS Code status bar."
+        },
+        "codexAccounts.sidebarSortOrder": {
+          "type": "string",
+          "enum": [
+            "default",
+            "fiveHourResetAsc",
+            "fiveHourResetDesc",
+            "weeklyResetAsc",
+            "weeklyResetDesc",
+            "fiveHourRemainingAsc",
+            "fiveHourRemainingDesc",
+            "weeklyRemainingAsc",
+            "weeklyRemainingDesc"
+          ],
+          "default": "default",
+          "markdownEnumDescriptions": [
+            "Default order: active account first, then most recently used.",
+            "Sort by `5h` reset time, earliest first.",
+            "Sort by `5h` reset time, latest first.",
+            "Sort by `1w` reset time, earliest first.",
+            "Sort by `1w` reset time, latest first.",
+            "Sort by `5h` remaining balance, lowest first.",
+            "Sort by `5h` remaining balance, highest first.",
+            "Sort by `1w` remaining balance, lowest first.",
+            "Sort by `1w` remaining balance, highest first."
+          ],
+          "description": "Controls how accounts are ordered in the sidebar."
         }
       }
     }
