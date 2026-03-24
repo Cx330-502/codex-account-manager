@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "onCommand:codexAccounts.importBundle",
     "onCommand:codexAccounts.exportBundle",
     "onCommand:codexAccounts.startLogin",
+    "onCommand:codexAccounts.reloginAccount",
     "onCommand:codexAccounts.openCodexHome",
     "onCommand:codexAccounts.refreshUsage",
     "onCommand:codexAccounts.reloadWindow",
@@ -89,6 +90,12 @@
         "title": "Codex Accounts: Start New Login",
         "shortTitle": "New Login",
         "icon": "$(plus)"
+      },
+      {
+        "command": "codexAccounts.reloginAccount",
+        "title": "Codex Accounts: Re-Login and Replace Account",
+        "shortTitle": "Re-Login Replace",
+        "icon": "$(sync)"
       },
       {
         "command": "codexAccounts.openCodexHome",

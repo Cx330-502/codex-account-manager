@@ -17,7 +17,13 @@ import type {
   RuntimeState,
   SharedStateInfo,
 } from "./types";
-import { UsageService } from "./usage";
+import {
+  encodeUsageFailure,
+  formatUsageFailureSummary,
+  toUsageFailureInfo,
+  type UsageFailureKind,
+} from "./usageFailure";
+import { UsageService, type UsageFetchResult } from "./usage";
 
 export interface ControllerState {
   accounts: ManagedAccount[];
@@ -29,8 +35,6 @@ export interface ControllerState {
 interface RefreshUsageOptions {
   reason?: "manual" | "background";
 }
-
-type UsageFailureKind = "token" | "network" | "service" | "other";
 
 export interface RestartState {
   thisWindowNeedsReload: boolean;
@@ -47,6 +51,8 @@ const FILE_WATCH_INTERVAL_MS = 1500;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const AUTO_REFRESH_TICK_MS = 60_000;
 const AUTO_REFRESH_LEASE_MS = 2 * 60_000;
+const AUTO_REFRESH_BETWEEN_ACCOUNT_DELAY_MS = 350;
+const AUTO_REFRESH_RETRY_DELAY_MS = 1_000;
 
 export class CodexAccountsController implements vscode.Disposable {
   private readonly onDidChangeStateEmitter = new vscode.EventEmitter<ControllerState>();
@@ -58,7 +64,9 @@ export class CodexAccountsController implements vscode.Disposable {
   private registryWatchDebounce: NodeJS.Timeout | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private autoRefreshTimer: NodeJS.Timeout | undefined;
+  private backgroundUsageRefreshInFlight = false;
   private disposed = false;
+  private pendingReloginAccountId: string | null = null;
   private state: ControllerState;
 
   public constructor(
@@ -259,19 +267,38 @@ export class CodexAccountsController implements vscode.Disposable {
 
   public async startLogin(): Promise<void> {
     const currentRecord = await this.store.captureCurrentAuth("manual");
-    const codexBinary = quoteForShell(this.resolveCodexBinary());
-    const terminal = vscode.window.createTerminal({
-      name: "Codex Login",
-      cwd: this.store.codexHome,
-    });
-    terminal.show(true);
-    terminal.sendText(`${codexBinary} logout`, true);
-    terminal.sendText(`${codexBinary} login`, true);
+    this.startLoginInTerminal();
 
     vscode.window.showInformationMessage(
       currentRecord
         ? `Saved ${getAccountLabel(currentRecord)} first, then started a clean Codex login. After the new login updates ~/.codex/auth.json, this extension will auto-capture it.`
         : "Started a clean Codex login. After the new login updates ~/.codex/auth.json, this extension will auto-capture it.",
+    );
+  }
+
+  public async reloginAccount(target?: AccountTarget): Promise<void> {
+    const account = await this.resolveAccount(
+      target,
+      "Select an account to re-login and replace",
+    );
+    if (!account) {
+      return;
+    }
+
+    const accounts = await this.store.listAccounts();
+    const previousActiveAccount =
+      accounts.find((entry) => entry.isActive)?.record.id ?? null;
+    if (!account.isActive) {
+      await this.store.switchToAccount(account.record.id);
+      await this.store.recordSwitch(previousActiveAccount, account.record.id);
+    }
+
+    this.pendingReloginAccountId = account.record.id;
+    this.startLoginInTerminal();
+    await this.refresh(false);
+
+    vscode.window.showInformationMessage(
+      `Started re-login for ${getAccountLabel(account.record)}. After login writes ~/.codex/auth.json, this entry will be replaced directly.`,
     );
   }
 
@@ -293,12 +320,20 @@ export class CodexAccountsController implements vscode.Disposable {
     target?: AccountTarget,
     options: RefreshUsageOptions = {},
   ): Promise<void> {
-    const accounts = await this.store.listAccounts();
-    const targetId = getAccountTargetId(target);
-    const targetAccounts = targetId
-      ? accounts.filter((account) => account.record.id === targetId)
-      : accounts;
     const isBackgroundRefresh = (options.reason ?? "manual") === "background";
+    if (isBackgroundRefresh && this.backgroundUsageRefreshInFlight) {
+      return;
+    }
+    if (isBackgroundRefresh) {
+      this.backgroundUsageRefreshInFlight = true;
+    }
+
+    try {
+      const accounts = await this.store.listAccounts();
+      const targetId = getAccountTargetId(target);
+      const targetAccounts = targetId
+        ? accounts.filter((account) => account.record.id === targetId)
+        : accounts;
     const minIntervalMinutes = isBackgroundRefresh
       ? getUsageRefreshMinIntervalMinutes()
       : 0;
@@ -311,7 +346,10 @@ export class CodexAccountsController implements vscode.Disposable {
     let firstFailureMessage: string | null = null;
     let firstFailureKind: UsageFailureKind | null = null;
 
-    for (const account of targetAccounts) {
+    for (const [index, account] of targetAccounts.entries()) {
+      if (isBackgroundRefresh && index > 0) {
+        await sleep(AUTO_REFRESH_BETWEEN_ACCOUNT_DELAY_MS);
+      }
       if (shouldSkipUsageRefresh(account.record, minIntervalMs)) {
         skippedCount += 1;
         firstSkippedAccount ??= account;
@@ -319,7 +357,10 @@ export class CodexAccountsController implements vscode.Disposable {
       }
 
       try {
-        const result = await this.usageService.fetchUsage(account.auth);
+        const result = await this.fetchUsageWithRetry(
+          account.auth,
+          isBackgroundRefresh,
+        );
         if (result.authRefreshed) {
           await this.store.updateAccountAuth(account.record.id, result.auth);
         }
@@ -327,10 +368,14 @@ export class CodexAccountsController implements vscode.Disposable {
         refreshedCount += 1;
       } catch (error) {
         const errorMessage = toErrorMessage(error);
-        await this.store.setUsage(account.record.id, undefined, errorMessage);
+        await this.store.setUsage(
+          account.record.id,
+          undefined,
+          encodeUsageFailure(errorMessage),
+        );
         failedCount += 1;
         firstFailureMessage ??= errorMessage;
-        firstFailureKind ??= classifyUsageFailure(errorMessage);
+        firstFailureKind ??= toUsageFailureInfo(errorMessage).kind;
       }
     }
 
@@ -395,6 +440,11 @@ export class CodexAccountsController implements vscode.Disposable {
         `Usage refresh finished: ${summaryParts.join(", ")}. Cooldown: ${minIntervalMinutes} min.`,
       );
     }
+    } finally {
+      if (isBackgroundRefresh) {
+        this.backgroundUsageRefreshInFlight = false;
+      }
+    }
   }
 
   private updateState(nextState: ControllerState): void {
@@ -449,7 +499,24 @@ export class CodexAccountsController implements vscode.Disposable {
 
   private async captureFromWatch(): Promise<void> {
     try {
-      const record = await this.store.captureCurrentAuth("auto");
+      const currentAuth = await this.store.readCurrentAuth();
+      if (!currentAuth) {
+        return;
+      }
+      let record: AccountRecord | null;
+      if (this.pendingReloginAccountId) {
+        try {
+          record = await this.store.replaceAccountAuth(
+            this.pendingReloginAccountId,
+            currentAuth,
+          );
+        } catch {
+          record = await this.store.saveSnapshotFromAuth(currentAuth, "auto");
+        }
+        this.pendingReloginAccountId = null;
+      } else {
+        record = await this.store.saveSnapshotFromAuth(currentAuth, "auto");
+      }
       await this.refresh(false);
       if (record) {
         void this.refreshUsage(record.id, {
@@ -457,8 +524,47 @@ export class CodexAccountsController implements vscode.Disposable {
         });
       }
     } catch {
+      this.pendingReloginAccountId = null;
       // Ignore watcher errors; state refresh already surfaces persistent issues.
     }
+  }
+
+  private startLoginInTerminal(): void {
+    const codexBinary = quoteForShell(this.resolveCodexBinary());
+    const terminal = vscode.window.createTerminal({
+      name: "Codex Login",
+      cwd: this.store.codexHome,
+    });
+    terminal.show(true);
+    terminal.sendText(`${codexBinary} logout`, true);
+    terminal.sendText(`${codexBinary} login`, true);
+  }
+
+  private async fetchUsageWithRetry(
+    auth: CodexAuthFile,
+    isBackgroundRefresh: boolean,
+  ): Promise<UsageFetchResult> {
+    const maxAttempts = isBackgroundRefresh ? 2 : 1;
+    let attempt = 0;
+    let lastError: unknown;
+    while (attempt < maxAttempts) {
+      try {
+        return await this.usageService.fetchUsage(auth);
+      } catch (error) {
+        lastError = error;
+        const failureKind = toUsageFailureInfo(toErrorMessage(error)).kind;
+        const canRetry =
+          isBackgroundRefresh &&
+          attempt + 1 < maxAttempts &&
+          (failureKind === "network" || failureKind === "service");
+        if (!canRetry) {
+          throw error;
+        }
+        await sleep(AUTO_REFRESH_RETRY_DELAY_MS * (attempt + 1));
+      }
+      attempt += 1;
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   private scheduleRegistryRefresh(): void {
@@ -722,79 +828,23 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function classifyUsageFailure(message: string): UsageFailureKind {
-  const normalized = message.toLowerCase();
-  const httpCodes = extractHttpStatusCodes(normalized);
-  if (httpCodes.some((code) => code === 401 || code === 403)) {
-    return "token";
-  }
-  if (httpCodes.some((code) => code === 502 || code === 503 || code === 504)) {
-    return "network";
-  }
-  if (
-    httpCodes.some(
-      (code) => code === 408 || code === 425 || code === 429 || (code >= 500 && code <= 599),
-    )
-  ) {
-    return "service";
-  }
-
-  if (
-    normalized.includes("refresh token") ||
-    normalized.includes("access token") ||
-    normalized.includes("token refresh") ||
-    normalized.includes("please run `codex login` again")
-  ) {
-    return "token";
-  }
-
-  if (
-    normalized.includes("fetch failed") ||
-    normalized.includes("unable to fetch usage") ||
-    normalized.includes("timed out") ||
-    normalized.includes("timeout") ||
-    normalized.includes("econn") ||
-    normalized.includes("enotfound") ||
-    normalized.includes("eai_again") ||
-    normalized.includes("socket") ||
-    normalized.includes("network") ||
-    normalized.includes("tls") ||
-    normalized.includes("ssl") ||
-    normalized.includes("could not resolve host") ||
-    normalized.includes("failed to connect")
-  ) {
-    return "network";
-  }
-
-  return "other";
-}
-
 function formatUsageFailureMessage(
   kind: UsageFailureKind | null,
   rawMessage: string | null,
 ): string {
-  switch (kind) {
-    case "token":
-      return `token expired or invalid. ${rawMessage ?? "Please run codex login again."}`;
-    case "network":
-      return `network request failed. ${rawMessage ?? "Please check network and try again. You can also reload this window."}`;
-    case "service":
-      return `OpenAI service is temporarily unavailable or rate-limited. ${rawMessage ?? "Please wait and retry."}`;
-    default:
-      return rawMessage ?? "unknown error";
-  }
-}
-
-function extractHttpStatusCodes(message: string): number[] {
-  const matches = message.match(/\bhttp\s+(\d{3})\b/gi) ?? [];
-  const codes: number[] = [];
-  for (const item of matches) {
-    const parsed = Number.parseInt(item.replace(/[^0-9]/g, ""), 10);
-    if (Number.isFinite(parsed)) {
-      codes.push(parsed);
+  if (!rawMessage) {
+    switch (kind) {
+      case "auth":
+        return "认证过期或无效：请重新登录 codex。";
+      case "network":
+        return "网络错误：请检查网络后重试。";
+      case "service":
+        return "服务异常或限流：请稍后重试。";
+      default:
+        return "未知错误";
     }
   }
-  return codes;
+  return formatUsageFailureSummary(rawMessage);
 }
 
 function getUsageRefreshMinIntervalMinutes(): number {
@@ -854,4 +904,10 @@ function formatElapsedTime(timestamp: string): string {
 
   const elapsedDays = Math.floor(elapsedHours / 24);
   return `${elapsedDays} day${elapsedDays === 1 ? "" : "s"}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

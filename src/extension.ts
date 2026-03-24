@@ -83,6 +83,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("codexAccounts.startLogin", async () => {
       await controller.startLogin();
     }),
+    vscode.commands.registerCommand(
+      "codexAccounts.reloginAccount",
+      async (item) => {
+        await controller.reloginAccount(item);
+      },
+    ),
     vscode.commands.registerCommand("codexAccounts.openCodexHome", async () => {
       await controller.openCodexHome();
     }),

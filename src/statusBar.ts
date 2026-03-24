@@ -4,6 +4,7 @@ import { getAccountLabel } from "./auth";
 import type { ControllerState } from "./controller";
 import { CodexAccountsController } from "./controller";
 import type { ManagedAccount } from "./types";
+import { toUsageFailureInfo } from "./usageFailure";
 
 export class CodexAccountsStatusBarController implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
@@ -163,6 +164,11 @@ function buildTooltip(active: ManagedAccount, state: ControllerState): string {
   const usage = active.record.usage;
   if (!usage) {
     lines.push("Usage: unavailable");
+    if (active.record.usageError) {
+      const failure = toUsageFailureInfo(active.record.usageError);
+      lines.push(`Refresh error type: ${failure.typeLabel}`);
+      lines.push(`Refresh error detail: ${failure.detail}`);
+    }
     return lines.join("\n");
   }
   const fiveHour = usage.windows.find((window) => window.key === "5h");
@@ -172,6 +178,11 @@ function buildTooltip(active: ManagedAccount, state: ControllerState): string {
   }
   if (weekly) {
     lines.push(`1w remaining: ${weekly.remainingPercent ?? "--"}%`);
+  }
+  if (active.record.usageError) {
+    const failure = toUsageFailureInfo(active.record.usageError);
+    lines.push(`Refresh error type: ${failure.typeLabel}`);
+    lines.push(`Refresh error detail: ${failure.detail}`);
   }
   return lines.join("\n");
 }

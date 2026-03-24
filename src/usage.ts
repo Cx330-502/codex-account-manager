@@ -5,7 +5,7 @@ import type { CodexAuthFile, UsageSnapshot, UsageWindowSummary } from "./types";
 
 const BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
 const ORIGINATOR = "codex_vscode";
-const REQUEST_TIMEOUT_MS = 12_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 const STATUS_MARKER = "__CODEX_STATUS__:";
 const TOKEN_REFRESH_ENDPOINT = "https://auth.openai.com/oauth/token";
 const TOKEN_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";

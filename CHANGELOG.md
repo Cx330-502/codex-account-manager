@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.4] - 2026-03-24
+
+- Added per-account `Re-login replace` flow: re-login now replaces the selected managed entry instead of creating a new snapshot first.
+- Improved usage refresh error UX with explicit error type labels (for example network/auth) plus separate detailed error text.
+- Fixed runtime state robustness: added atomic JSON writes, runtime state lock coordination across windows, and runtime corruption auto-recovery.
+- Improved background usage refresh stability with in-flight guarding, higher request timeout, and retry/backoff pacing for transient network/service failures.
+- Updated extension debug launch config so `F5` opens the current workspace directly.
+
 ## [0.2.3] - 2026-03-19
 
 - Improved `Refresh Usage` failure diagnostics by classifying failures into token, network, and service-side errors.

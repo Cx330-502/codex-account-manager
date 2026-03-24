@@ -22,6 +22,8 @@ import type {
 const REGISTRY_VERSION = 1 as const;
 const RUNTIME_STATE_VERSION = 1 as const;
 const WINDOW_SESSION_STALE_MS = 2 * 60_000;
+const RUNTIME_LOCK_STALE_MS = 30_000;
+const RUNTIME_LOCK_WAIT_MS = 3_000;
 
 export class CodexAccountStore {
   public readonly authPath: string;
@@ -314,6 +316,61 @@ export class CodexAccountStore {
     });
   }
 
+  public async replaceAccountAuth(
+    targetId: string,
+    auth: CodexAuthFile,
+  ): Promise<AccountRecord> {
+    await this.ensureReady();
+
+    const registry = await this.readRegistry();
+    const targetRecord = registry.accounts.find((record) => record.id === targetId);
+    if (!targetRecord) {
+      throw new Error(`Managed account not found: ${targetId}`);
+    }
+
+    const identity = deriveAccountIdentity(auth);
+    const nextId = identity.fingerprint;
+    const mergedAt = new Date().toISOString();
+    const existingAtNextId = registry.accounts.find(
+      (record) => record.id === nextId && record.id !== targetId,
+    );
+    const nextRecord: AccountRecord = {
+      ...targetRecord,
+      id: nextId,
+      updatedAt: mergedAt,
+      lastCapturedAt: mergedAt,
+      snapshotHash: computeSnapshotHash(auth),
+      email: identity.email ?? targetRecord.email,
+      name: identity.name ?? targetRecord.name,
+      subject: identity.subject ?? targetRecord.subject,
+      accountId: identity.accountId ?? targetRecord.accountId,
+      chatgptAccountId: identity.chatgptAccountId ?? targetRecord.chatgptAccountId,
+      authMode: identity.authMode ?? targetRecord.authMode,
+      usage: undefined,
+      usageCheckedAt: null,
+      usageError: null,
+    };
+
+    await this.writeJsonFile(this.getSnapshotPath(nextId), auth);
+    if (targetId !== nextId) {
+      await fs.rm(this.getSnapshotPath(targetId), { force: true });
+    }
+    if (existingAtNextId && existingAtNextId.id !== targetId) {
+      await fs.rm(this.getSnapshotPath(existingAtNextId.id), { force: true });
+    }
+
+    const nextAccounts = registry.accounts.filter(
+      (record) => record.id !== targetId && record.id !== existingAtNextId?.id,
+    );
+    nextAccounts.push(nextRecord);
+    await this.writeRegistry({
+      version: REGISTRY_VERSION,
+      accounts: nextAccounts,
+    });
+
+    return nextRecord;
+  }
+
   public async exportBundle(targetPath: string): Promise<number> {
     const registry = await this.readRegistry();
     const accounts = [];
@@ -379,92 +436,104 @@ export class CodexAccountStore {
     windowId: string,
     runtimeAccountId: string | null,
   ): Promise<void> {
-    const { state } = await this.readRuntimeState();
-    const now = new Date().toISOString();
-    const generation = state.lastSwitch?.generation ?? 0;
-    const nextSession: WindowSessionRecord = {
-      id: windowId,
-      startedAt: now,
-      lastSeenAt: now,
-      runtimeAccountId,
-      acknowledgedSwitchGeneration: generation,
-    };
-    state.windowSessions = state.windowSessions.filter((session) => session.id !== windowId);
-    state.windowSessions.push(nextSession);
-    await this.writeRuntimeState(state);
+    await this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      const now = new Date().toISOString();
+      const generation = state.lastSwitch?.generation ?? 0;
+      const nextSession: WindowSessionRecord = {
+        id: windowId,
+        startedAt: now,
+        lastSeenAt: now,
+        runtimeAccountId,
+        acknowledgedSwitchGeneration: generation,
+      };
+      state.windowSessions = state.windowSessions.filter((session) => session.id !== windowId);
+      state.windowSessions.push(nextSession);
+      await this.writeRuntimeState(state);
+    });
   }
 
   public async heartbeatWindowSession(windowId: string): Promise<void> {
-    const { state } = await this.readRuntimeState();
-    const session = state.windowSessions.find((entry) => entry.id === windowId);
-    if (!session) {
-      return;
-    }
+    await this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      const session = state.windowSessions.find((entry) => entry.id === windowId);
+      if (!session) {
+        return;
+      }
 
-    session.lastSeenAt = new Date().toISOString();
-    await this.writeRuntimeState(state);
+      session.lastSeenAt = new Date().toISOString();
+      await this.writeRuntimeState(state);
+    });
   }
 
   public async removeWindowSession(windowId: string): Promise<void> {
-    const { state } = await this.readRuntimeState();
-    const nextSessions = state.windowSessions.filter((session) => session.id !== windowId);
-    if (nextSessions.length === state.windowSessions.length) {
-      return;
-    }
-    state.windowSessions = nextSessions;
-    await this.writeRuntimeState(state);
+    await this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      const nextSessions = state.windowSessions.filter((session) => session.id !== windowId);
+      if (nextSessions.length === state.windowSessions.length) {
+        return;
+      }
+      state.windowSessions = nextSessions;
+      await this.writeRuntimeState(state);
+    });
   }
 
   public async recordSwitch(
     previousAccountId: string | null,
     nextAccountId: string | null,
   ): Promise<SwitchMarker> {
-    const { state } = await this.readRuntimeState();
-    const marker: SwitchMarker = {
-      generation: (state.lastSwitch?.generation ?? 0) + 1,
-      previousAccountId,
-      nextAccountId,
-      switchedAt: new Date().toISOString(),
-    };
-    state.lastSwitch = marker;
-    await this.writeRuntimeState(state);
-    return marker;
+    return this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      const marker: SwitchMarker = {
+        generation: (state.lastSwitch?.generation ?? 0) + 1,
+        previousAccountId,
+        nextAccountId,
+        switchedAt: new Date().toISOString(),
+      };
+      state.lastSwitch = marker;
+      await this.writeRuntimeState(state);
+      return marker;
+    });
   }
 
   public async tryAcquireUsageRefreshLease(
     windowId: string,
     leaseMs: number,
   ): Promise<boolean> {
-    const { state } = await this.readRuntimeState();
-    const nowMs = Date.now();
-    const activeLease = state.usageRefreshLease;
-    if (activeLease) {
-      const expiresAtMs = Date.parse(activeLease.expiresAt);
-      if (
-        activeLease.ownerWindowId !== windowId &&
-        Number.isFinite(expiresAtMs) &&
-        expiresAtMs > nowMs
-      ) {
-        return false;
+    return this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      const nowMs = Date.now();
+      const activeLease = state.usageRefreshLease;
+      if (activeLease) {
+        const expiresAtMs = Date.parse(activeLease.expiresAt);
+        if (
+          activeLease.ownerWindowId !== windowId &&
+          Number.isFinite(expiresAtMs) &&
+          expiresAtMs > nowMs
+        ) {
+          return false;
+        }
       }
-    }
 
-    state.usageRefreshLease = {
-      ownerWindowId: windowId,
-      acquiredAt: new Date(nowMs).toISOString(),
-      expiresAt: new Date(nowMs + leaseMs).toISOString(),
-    };
-    await this.writeRuntimeState(state);
-    return true;
+      state.usageRefreshLease = {
+        ownerWindowId: windowId,
+        acquiredAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(nowMs + leaseMs).toISOString(),
+      };
+      await this.writeRuntimeState(state);
+      return true;
+    });
   }
 
   public async releaseUsageRefreshLease(windowId: string): Promise<void> {
-    const { state } = await this.readRuntimeState();
-    if (state.usageRefreshLease?.ownerWindowId !== windowId) {
-      return;
-    }
-    state.usageRefreshLease = null;
-    await this.writeRuntimeState(state);
+    await this.withRuntimeStateLock(async () => {
+      const { state } = await this.readRuntimeState();
+      if (state.usageRefreshLease?.ownerWindowId !== windowId) {
+        return;
+      }
+      state.usageRefreshLease = null;
+      await this.writeRuntimeState(state);
+    });
   }
 
   private async readRegistry(): Promise<AccountRegistry> {
@@ -500,7 +569,7 @@ export class CodexAccountStore {
   private async readRuntimeState(): Promise<{
     state: RuntimeState;
   }> {
-    const runtime = await this.readJsonFile<RuntimeState>(this.runtimeStatePath);
+    const runtime = await this.readRuntimeStateFile();
     const normalizedState = this.normalizeRuntimeState(runtime);
     return {
       state: normalizedState,
@@ -551,6 +620,105 @@ export class CodexAccountStore {
     });
   }
 
+  private async readRuntimeStateFile(): Promise<RuntimeState | null> {
+    try {
+      return await this.readJsonFile<RuntimeState>(this.runtimeStatePath);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+
+      const recovered = await this.tryRecoverRuntimeState();
+      if (recovered) {
+        return recovered;
+      }
+      return null;
+    }
+  }
+
+  private async tryRecoverRuntimeState(): Promise<RuntimeState | null> {
+    let raw = "";
+    try {
+      raw = await fs.readFile(this.runtimeStatePath, "utf8");
+    } catch {
+      return null;
+    }
+
+    const recovered = parseLeadingJsonObject<RuntimeState>(raw);
+    if (!recovered) {
+      return null;
+    }
+
+    try {
+      const backupPath = `${this.runtimeStatePath}.corrupt-${Date.now()}.json`;
+      await fs.rename(this.runtimeStatePath, backupPath);
+    } catch {
+      // Best effort backup only.
+    }
+
+    await this.writeJsonFile(this.runtimeStatePath, recovered);
+    return recovered;
+  }
+
+  private async withRuntimeStateLock<T>(task: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.runtimeStatePath}.lock`;
+    const startedAt = Date.now();
+    while (true) {
+      const lockHandle = await this.tryAcquireLockFile(lockPath);
+      if (lockHandle) {
+        try {
+          return await task();
+        } finally {
+          await this.releaseLockFile(lockHandle, lockPath);
+        }
+      }
+
+      await this.clearStaleLock(lockPath);
+      if (Date.now() - startedAt > RUNTIME_LOCK_WAIT_MS) {
+        throw new Error("Timed out waiting for runtime state lock.");
+      }
+      await sleep(25);
+    }
+  }
+
+  private async tryAcquireLockFile(filePath: string): Promise<fs.FileHandle | null> {
+    try {
+      return await fs.open(filePath, "wx", 0o600);
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: string }).code === "EEXIST"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async releaseLockFile(
+    lockHandle: fs.FileHandle,
+    lockPath: string,
+  ): Promise<void> {
+    try {
+      await lockHandle.close();
+    } finally {
+      await fs.rm(lockPath, { force: true });
+    }
+  }
+
+  private async clearStaleLock(lockPath: string): Promise<void> {
+    try {
+      const stats = await fs.stat(lockPath);
+      if (Date.now() - stats.mtimeMs > RUNTIME_LOCK_STALE_MS) {
+        await fs.rm(lockPath, { force: true });
+      }
+    } catch {
+      // Ignore races/missing lock file.
+    }
+  }
+
   private async readJsonFile<T>(filePath: string): Promise<T | null> {
     try {
       const contents = await fs.readFile(filePath, "utf8");
@@ -566,7 +734,20 @@ export class CodexAccountStore {
 
   private async writeJsonFile(filePath: string, payload: unknown): Promise<void> {
     await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    const directory = path.dirname(filePath);
+    const baseName = path.basename(filePath);
+    const tempPath = path.join(
+      directory,
+      `.${baseName}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    const contents = `${JSON.stringify(payload, null, 2)}\n`;
+    await fs.writeFile(tempPath, contents, "utf8");
+    try {
+      await fs.chmod(tempPath, 0o600);
+    } catch {
+      // chmod is best-effort only.
+    }
+    await fs.rename(tempPath, filePath);
     try {
       await fs.chmod(filePath, 0o600);
     } catch {
@@ -582,4 +763,61 @@ function isMissingFileError(error: unknown): boolean {
     "code" in error &&
     (error as { code?: string }).code === "ENOENT"
   );
+}
+
+function parseLeadingJsonObject<T>(input: string): T | null {
+  const source = input.trimStart();
+  if (!source.startsWith("{")) {
+    return null;
+  }
+
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = source.slice(0, index + 1);
+        try {
+          return JSON.parse(candidate) as T;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

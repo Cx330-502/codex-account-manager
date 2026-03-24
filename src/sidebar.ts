@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import { getAccountLabel } from "./auth";
 import type { ControllerState } from "./controller";
 import { CodexAccountsController } from "./controller";
+import { toUsageFailureInfo } from "./usageFailure";
 
 type SidebarMessage =
   | { type: "refresh" }
@@ -13,6 +14,7 @@ type SidebarMessage =
   | { type: "exportBundle" }
   | { type: "reloadWindow" }
   | { type: "startLogin" }
+  | { type: "reloginAccount"; id: string }
   | { type: "openCodexHome" }
   | { type: "switchAccount"; id: string }
   | { type: "renameAccount"; id: string }
@@ -80,6 +82,12 @@ export class CodexAccountsSidebarProvider
       case "startLogin":
         await vscode.commands.executeCommand("codexAccounts.startLogin");
         break;
+      case "reloginAccount":
+        await vscode.commands.executeCommand(
+          "codexAccounts.reloginAccount",
+          message.id,
+        );
+        break;
       case "openCodexHome":
         await vscode.commands.executeCommand("codexAccounts.openCodexHome");
         break;
@@ -122,7 +130,11 @@ export class CodexAccountsSidebarProvider
         "Switches auth only. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
       restart: state.restart,
-      accounts: state.accounts.map((account) => ({
+      accounts: state.accounts.map((account) => {
+        const usageFailure = account.record.usageError
+          ? toUsageFailureInfo(account.record.usageError)
+          : null;
+        return {
         id: account.record.id,
         label: getAccountLabel(account.record),
         email: account.record.email ?? null,
@@ -138,10 +150,13 @@ export class CodexAccountsSidebarProvider
           account.record.usage?.fetchedAt ??
           null,
         usageError: account.record.usageError ?? null,
+        usageErrorType: usageFailure?.typeLabel ?? null,
+        usageErrorDetail: usageFailure?.detail ?? null,
         lastCapturedAt: account.record.lastCapturedAt,
         lastUsedAt: account.record.lastUsedAt ?? null,
         windows: account.record.usage?.windows ?? [],
-      })),
+      };
+      }),
     };
   }
 
@@ -636,6 +651,29 @@ export class CodexAccountsSidebarProvider
         line-height: 1.5;
       }
 
+      .usage-error {
+        margin-top: 10px;
+        border-radius: 12px;
+        border: 1px solid color-mix(in srgb, var(--danger) 36%, transparent);
+        background: color-mix(in srgb, var(--danger-soft) 92%, transparent);
+        padding: 9px 10px;
+        display: grid;
+        gap: 3px;
+      }
+
+      .usage-error-type {
+        font-size: 12px;
+        font-weight: 800;
+        color: var(--danger-strong);
+      }
+
+      .usage-error-detail {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.4;
+        word-break: break-word;
+      }
+
       .restart-banner {
         border-radius: 18px;
         border: 1px solid color-mix(in srgb, var(--warning) 34%, transparent);
@@ -861,6 +899,7 @@ export class CodexAccountsSidebarProvider
               <div>Captured \${escapeHtml(formatWhen(account.lastCapturedAt))}\${account.lastUsedAt ? \` · Switched \${escapeHtml(formatWhen(account.lastUsedAt))}\` : ""}</div>
               <div>Auth mode: \${escapeHtml(account.authMode || "unknown")}</div>
             </div>
+            \${renderUsageError(account)}
 
             <div class="account-actions">
               \${account.isActive
@@ -871,6 +910,7 @@ export class CodexAccountsSidebarProvider
                 ? \`<button class="card-button-secondary" data-action="switchAccount" data-id="\${escapeAttr(state.restart.currentWindowAccountId)}">Revert auth.json</button>\`
                 : ""}
               <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh usage</button>
+              <button class="card-button-secondary" data-action="reloginAccount" data-id="\${escapeAttr(account.id)}">Re-login replace</button>
               <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
               <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>
             </div>
@@ -908,10 +948,12 @@ export class CodexAccountsSidebarProvider
               <div>\${renderUsageMeta(account, true)}</div>
               <div>Captured \${escapeHtml(formatWhen(account.lastCapturedAt))}\${account.lastUsedAt ? \` · Switched \${escapeHtml(formatWhen(account.lastUsedAt))}\` : ""}</div>
             </div>
+            \${renderUsageError(account)}
 
             <div class="account-actions compact-actions">
               <button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch</button>
               <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh</button>
+              <button class="card-button-secondary" data-action="reloginAccount" data-id="\${escapeAttr(account.id)}">Re-login replace</button>
               <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
               <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>
             </div>
@@ -1004,16 +1046,20 @@ export class CodexAccountsSidebarProvider
             parts.push(\`Server \${escapeHtml(formatWhen(account.usageSourceTimestamp))}\`);
           }
           if (!compact && account.usageError) {
-            parts.push(\`Last error: \${escapeHtml(account.usageError)}\`);
+            parts.push(
+              \`Last error: \${escapeHtml(account.usageErrorType || "Unknown")} \${escapeHtml(account.usageErrorDetail || "")}\`,
+            );
           }
           return parts.join(" · ");
         }
 
         if (account.usageError) {
+          const type = account.usageErrorType || "Unknown";
+          const detail = account.usageErrorDetail || "";
           if (account.usageCheckedAt) {
-            return \`Last checked \${escapeHtml(formatWhen(account.usageCheckedAt))} · Usage unavailable: \${escapeHtml(account.usageError)}\`;
+            return \`Last checked \${escapeHtml(formatWhen(account.usageCheckedAt))} · Usage unavailable: \${escapeHtml(type)}\${detail ? \` · \${escapeHtml(detail)}\` : ""}\`;
           }
-          return \`Usage unavailable: \${escapeHtml(account.usageError)}\`;
+          return \`Usage unavailable: \${escapeHtml(type)}\${detail ? \` · \${escapeHtml(detail)}\` : ""}\`;
         }
 
         if (account.usageCheckedAt) {
@@ -1021,6 +1067,18 @@ export class CodexAccountsSidebarProvider
         }
 
         return "Usage not loaded yet";
+      }
+
+      function renderUsageError(account) {
+        if (!account.usageErrorType) {
+          return "";
+        }
+        return \`
+          <div class="usage-error">
+            <div class="usage-error-type">\${escapeHtml(account.usageErrorType)}</div>
+            <div class="usage-error-detail">\${escapeHtml(account.usageErrorDetail || "")}</div>
+          </div>
+        \`;
       }
 
       function getUsageTone(remaining) {
