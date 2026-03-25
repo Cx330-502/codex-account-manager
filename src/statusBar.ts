@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 
 import { getAccountLabel } from "./auth";
-import type { ControllerState } from "./controller";
+import type { ControllerState, CurrentWindowAccountState } from "./controller";
 import { CodexAccountsController } from "./controller";
 import type { ManagedAccount } from "./types";
 import { toUsageFailureInfo } from "./usageFailure";
@@ -44,18 +44,18 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
       return;
     }
 
-    const active = state.accounts.find((account) => account.isActive);
-    if (!active) {
+    const currentWindowAccount = state.currentWindowAccount;
+    if (!currentWindowAccount.account) {
       this.item.text = "$(pulse) 5h -- | 1w --";
-      this.item.tooltip = "No active managed account. Click to open quick actions.";
+      this.item.tooltip = buildUnavailableTooltip(currentWindowAccount, state);
       this.item.show();
       this.renderRestartState(state);
       return;
     }
 
-    const usage = summarizeUsage(active);
+    const usage = summarizeUsage(currentWindowAccount.account);
     this.item.text = `$(pulse) ${usage}`;
-    this.item.tooltip = `${buildTooltip(active, state)}\nClick to open the full sidebar.`;
+    this.item.tooltip = `${buildTooltip(currentWindowAccount, state)}\nClick to open the full sidebar.`;
     this.item.show();
     this.renderRestartState(state);
   }
@@ -148,9 +148,17 @@ function summarizeUsage(active: ManagedAccount): string {
   return parts.join(" | ");
 }
 
-function buildTooltip(active: ManagedAccount, state: ControllerState): string {
+function buildTooltip(
+  currentWindowAccount: CurrentWindowAccountState,
+  state: ControllerState,
+): string {
+  const active = currentWindowAccount.account;
+  if (!active) {
+    return buildUnavailableTooltip(currentWindowAccount, state);
+  }
+
   const lines: string[] = [
-    `Active: ${getAccountLabel(active.record)}`,
+    `Current window: ${getAccountLabel(active.record)}`,
     "Click for switch/import/export/refresh actions.",
   ];
   if (state.restart.thisWindowNeedsReload) {
@@ -183,6 +191,28 @@ function buildTooltip(active: ManagedAccount, state: ControllerState): string {
     const failure = toUsageFailureInfo(active.record.usageError);
     lines.push(`Refresh error type: ${failure.typeLabel}`);
     lines.push(`Refresh error detail: ${failure.detail}`);
+  }
+  return lines.join("\n");
+}
+
+function buildUnavailableTooltip(
+  currentWindowAccount: CurrentWindowAccountState,
+  state: ControllerState,
+): string {
+  const label = currentWindowAccount.label ?? "unknown account";
+  const lines: string[] = [
+    `Current window: ${label}`,
+    "Usage: unavailable",
+    "This window is running an account that is not currently available in managed snapshots.",
+    "Click for switch/import/export/refresh actions.",
+  ];
+  if (state.restart.thisWindowNeedsReload) {
+    lines.push(
+      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
+    );
+    lines.push(
+      `Live auth now points to ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
+    );
   }
   return lines.join("\n");
 }

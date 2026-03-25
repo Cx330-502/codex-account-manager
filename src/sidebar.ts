@@ -140,6 +140,28 @@ export class CodexAccountsSidebarProvider
       state.accounts,
       getSidebarSortOrder(),
     );
+    const currentWindowAccount = state.currentWindowAccount.account
+      ? toViewAccount(state.currentWindowAccount.account)
+      : {
+          id: state.currentWindowAccount.accountId,
+          label: state.currentWindowAccount.label ?? "Unknown window account",
+          email: null,
+          authMode: null,
+          accountId: state.currentWindowAccount.accountId,
+          isActive: false,
+          isManaged: false,
+          planType: null,
+          creditLabel: null,
+          usageFetchedAt: null,
+          usageSourceTimestamp: null,
+          usageCheckedAt: null,
+          usageError: null,
+          usageErrorType: null,
+          usageErrorDetail: null,
+          lastCapturedAt: null,
+          lastUsedAt: null,
+          windows: [],
+        };
 
     return {
       generatedAt: new Date().toISOString(),
@@ -148,33 +170,8 @@ export class CodexAccountsSidebarProvider
         "Switches auth only. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
       restart: state.restart,
-      accounts: accounts.map((account) => {
-        const usageFailure = account.record.usageError
-          ? toUsageFailureInfo(account.record.usageError)
-          : null;
-        return {
-        id: account.record.id,
-        label: getAccountLabel(account.record),
-        email: account.record.email ?? null,
-        authMode: account.record.authMode ?? null,
-        accountId: account.record.chatgptAccountId ?? account.record.accountId ?? null,
-        isActive: account.isActive,
-        planType: account.record.usage?.planType ?? null,
-        creditLabel: account.record.usage?.creditLabel ?? null,
-        usageFetchedAt: account.record.usage?.fetchedAt ?? null,
-        usageSourceTimestamp: account.record.usage?.sourceTimestamp ?? null,
-        usageCheckedAt:
-          account.record.usageCheckedAt ??
-          account.record.usage?.fetchedAt ??
-          null,
-        usageError: account.record.usageError ?? null,
-        usageErrorType: usageFailure?.typeLabel ?? null,
-        usageErrorDetail: usageFailure?.detail ?? null,
-        lastCapturedAt: account.record.lastCapturedAt,
-        lastUsedAt: account.record.lastUsedAt ?? null,
-        windows: account.record.usage?.windows ?? [],
-      };
-      }),
+      currentWindowAccount,
+      accounts: accounts.map((account) => toViewAccount(account)),
     };
   }
 
@@ -794,15 +791,20 @@ export class CodexAccountsSidebarProvider
         ].join("");
 
         const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+        const currentWindowAccount = state.currentWindowAccount || null;
         const restartBanner = state.restart?.thisWindowNeedsReload
           ? renderRestartBanner(state.restart)
           : "";
-        const currentAccount = accounts.find((account) => account.isActive) || null;
+        const currentAccount =
+          currentWindowAccount &&
+          (currentWindowAccount.id || currentWindowAccount.label || currentWindowAccount.isManaged)
+            ? currentWindowAccount
+            : null;
         const otherAccounts = currentAccount
           ? accounts.filter((account) => account.id !== currentAccount.id)
           : accounts;
         const accountMarkup =
-          accounts.length === 0
+          !currentAccount && accounts.length === 0
             ? emptyState()
             : [
                 currentAccount ? renderCurrentSection(currentAccount) : "",
@@ -860,8 +862,8 @@ export class CodexAccountsSidebarProvider
         return \`
           <section class="section">
             <div class="section-heading">
-              <div class="section-title">Current Account</div>
-              <div class="section-copy">Switching only changes auth.json</div>
+              <div class="section-title">Current Window Account</div>
+              <div class="section-copy">This window keeps using this account until reload</div>
             </div>
             \${renderCurrentCard(account)}
           </section>
@@ -889,6 +891,12 @@ export class CodexAccountsSidebarProvider
       function renderCurrentCard(account) {
         const badges = [];
         badges.push('<span class="badge active">Current</span>');
+        if (account.isActive) {
+          badges.push('<span class="badge">Live auth.json</span>');
+        }
+        if (!account.isManaged) {
+          badges.push('<span class="badge">Unmanaged</span>');
+        }
         if (account.planType) {
           badges.push(\`<span class="badge">\${escapeHtml(account.planType)}</span>\`);
         }
@@ -902,7 +910,7 @@ export class CodexAccountsSidebarProvider
           <article class="account-card current-card active">
             <div class="account-head">
               <div>
-                <div class="account-title">\${escapeHtml(account.label)}</div>
+              <div class="account-title">\${escapeHtml(account.label)}</div>
                 <div class="account-email">\${escapeHtml(account.email || account.accountId || "Unknown identity")}</div>
               </div>
               <div class="badge-row">\${badges.join("")}</div>
@@ -916,23 +924,25 @@ export class CodexAccountsSidebarProvider
 
             <div class="account-foot">
               <div>\${usageMeta}</div>
-              <div>Captured \${escapeHtml(formatWhen(account.lastCapturedAt))}\${account.lastUsedAt ? \` · Switched \${escapeHtml(formatWhen(account.lastUsedAt))}\` : ""}</div>
+              <div>\${account.lastCapturedAt ? \`Captured \${escapeHtml(formatWhen(account.lastCapturedAt))}\${account.lastUsedAt ? \` · Switched \${escapeHtml(formatWhen(account.lastUsedAt))}\` : ""}\` : "Managed snapshot unavailable in local registry"}</div>
               <div>Auth mode: \${escapeHtml(account.authMode || "unknown")}</div>
             </div>
             \${renderUsageError(account)}
 
             <div class="account-actions">
-              \${account.isActive
-                ? '<button class="card-button" disabled>Current account</button>'
-                : \`<button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch</button>\`}
+              \${account.isManaged
+                ? (account.isActive
+                  ? '<button class="card-button" disabled>Current live auth</button>'
+                  : \`<button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch live auth</button>\`)
+                : '<button class="card-button" disabled>Not in managed snapshots</button>'}
               \${state.restart?.thisWindowNeedsReload ? '<button class="card-button-secondary" data-action="reloadWindow">Reload window</button>' : ""}
               \${state.restart?.canRevertToWindowAccount && state.restart?.currentWindowAccountId
                 ? \`<button class="card-button-secondary" data-action="switchAccount" data-id="\${escapeAttr(state.restart.currentWindowAccountId)}">Revert auth.json</button>\`
                 : ""}
-              <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh usage</button>
-              <button class="card-button-secondary" data-action="reloginAccount" data-id="\${escapeAttr(account.id)}">Re-login replace</button>
-              <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
-              <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>
+              \${account.isManaged ? \`<button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh usage</button>\` : ""}
+              \${account.isManaged ? \`<button class="card-button-secondary" data-action="reloginAccount" data-id="\${escapeAttr(account.id)}">Re-login replace</button>\` : ""}
+              \${account.isManaged ? \`<button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>\` : ""}
+              \${account.isManaged ? \`<button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>\` : ""}
             </div>
           </article>
         \`;
@@ -1334,6 +1344,36 @@ function sortSidebarAccounts(
   });
 
   return sorted;
+}
+
+function toViewAccount(account: ManagedAccount): Record<string, unknown> {
+  const usageFailure = account.record.usageError
+    ? toUsageFailureInfo(account.record.usageError)
+    : null;
+
+  return {
+    id: account.record.id,
+    label: getAccountLabel(account.record),
+    email: account.record.email ?? null,
+    authMode: account.record.authMode ?? null,
+    accountId: account.record.chatgptAccountId ?? account.record.accountId ?? null,
+    isActive: account.isActive,
+    isManaged: true,
+    planType: account.record.usage?.planType ?? null,
+    creditLabel: account.record.usage?.creditLabel ?? null,
+    usageFetchedAt: account.record.usage?.fetchedAt ?? null,
+    usageSourceTimestamp: account.record.usage?.sourceTimestamp ?? null,
+    usageCheckedAt:
+      account.record.usageCheckedAt ??
+      account.record.usage?.fetchedAt ??
+      null,
+    usageError: account.record.usageError ?? null,
+    usageErrorType: usageFailure?.typeLabel ?? null,
+    usageErrorDetail: usageFailure?.detail ?? null,
+    lastCapturedAt: account.record.lastCapturedAt,
+    lastUsedAt: account.record.lastUsedAt ?? null,
+    windows: account.record.usage?.windows ?? [],
+  };
 }
 
 function compareSortMetric(

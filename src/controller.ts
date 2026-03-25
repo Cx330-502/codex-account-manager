@@ -27,9 +27,16 @@ import { UsageService, type UsageFetchResult } from "./usage";
 
 export interface ControllerState {
   accounts: ManagedAccount[];
+  currentWindowAccount: CurrentWindowAccountState;
   sharedState: SharedStateInfo;
   restart: RestartState;
   lastError: string | null;
+}
+
+export interface CurrentWindowAccountState {
+  accountId: string | null;
+  label: string | null;
+  account: ManagedAccount | null;
 }
 
 interface RefreshUsageOptions {
@@ -68,6 +75,7 @@ export class CodexAccountsController implements vscode.Disposable {
   private refreshRecoveryTimer: NodeJS.Timeout | undefined;
   private heartbeatTimer: NodeJS.Timeout | undefined;
   private autoRefreshTimer: NodeJS.Timeout | undefined;
+  private initialAutoRefreshTimer: NodeJS.Timeout | undefined;
   private backgroundUsageRefreshInFlight = false;
   private readonly backgroundFailureCounts = new Map<string, number>();
   private disposed = false;
@@ -82,6 +90,7 @@ export class CodexAccountsController implements vscode.Disposable {
     this.windowId = windowId;
     this.state = {
       accounts: [],
+      currentWindowAccount: emptyCurrentWindowAccountState(),
       sharedState: this.store.getSharedStateInfo(),
       restart: emptyRestartState(),
       lastError: null,
@@ -101,7 +110,7 @@ export class CodexAccountsController implements vscode.Disposable {
     await this.refresh(false);
     this.startWatchingFiles();
     this.startIntervals();
-    await this.runAutoRefreshTick();
+    this.scheduleInitialAutoRefresh();
   }
 
   public dispose(): void {
@@ -121,6 +130,9 @@ export class CodexAccountsController implements vscode.Disposable {
     if (this.autoRefreshTimer) {
       clearInterval(this.autoRefreshTimer);
     }
+    if (this.initialAutoRefreshTimer) {
+      clearTimeout(this.initialAutoRefreshTimer);
+    }
     fs.unwatchFile(this.store.authPath);
     fs.unwatchFile(this.store.registryPath);
     void this.store.removeWindowSession(this.windowId);
@@ -133,10 +145,16 @@ export class CodexAccountsController implements vscode.Disposable {
       const currentAuth = await this.store.readCurrentAuth();
       const runtime = await this.store.getRuntimeState();
       const liveAuthState = describeLiveAuth(accounts, currentAuth);
+      const restart = this.buildRestartState(accounts, runtime, liveAuthState);
       this.updateState({
         accounts,
+        currentWindowAccount: this.buildCurrentWindowAccountState(
+          accounts,
+          restart,
+          liveAuthState,
+        ),
         sharedState: this.store.getSharedStateInfo(),
-        restart: this.buildRestartState(accounts, runtime, liveAuthState),
+        restart,
         lastError: null,
       });
       if (this.refreshRecoveryTimer) {
@@ -158,6 +176,7 @@ export class CodexAccountsController implements vscode.Disposable {
       this.scheduleRefreshRecovery();
       this.updateState({
         accounts: this.state.accounts,
+        currentWindowAccount: this.state.currentWindowAccount,
         sharedState: this.store.getSharedStateInfo(),
         restart: this.state.restart,
         lastError: toErrorMessage(error),
@@ -517,6 +536,17 @@ export class CodexAccountsController implements vscode.Disposable {
     }, AUTO_REFRESH_TICK_MS);
   }
 
+  private scheduleInitialAutoRefresh(): void {
+    if (this.initialAutoRefreshTimer || this.disposed) {
+      return;
+    }
+
+    this.initialAutoRefreshTimer = setTimeout(() => {
+      this.initialAutoRefreshTimer = undefined;
+      void this.runAutoRefreshTick();
+    }, 250);
+  }
+
   private async captureFromWatch(): Promise<void> {
     try {
       const currentAuth = await this.store.readCurrentAuth();
@@ -754,6 +784,27 @@ export class CodexAccountsController implements vscode.Disposable {
       ).length,
     };
   }
+
+  private buildCurrentWindowAccountState(
+    accounts: ManagedAccount[],
+    restart: RestartState,
+    liveAuthState: LiveAuthState,
+  ): CurrentWindowAccountState {
+    const accountId = restart.currentWindowAccountId ?? liveAuthState.accountId;
+    const account =
+      accountId != null
+        ? accounts.find((entry) => entry.record.id === accountId) ?? null
+        : null;
+
+    return {
+      accountId,
+      label:
+        account != null
+          ? getAccountLabel(account.record)
+          : restart.currentWindowAccountLabel ?? liveAuthState.label,
+      account,
+    };
+  }
 }
 
 type AccountTarget =
@@ -818,6 +869,14 @@ function emptyRestartState(): RestartState {
     liveAccountLabel: null,
     switchedAt: null,
     pendingWindowCount: 0,
+  };
+}
+
+function emptyCurrentWindowAccountState(): CurrentWindowAccountState {
+  return {
+    accountId: null,
+    label: null,
+    account: null,
   };
 }
 

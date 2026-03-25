@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.9] - 2026-03-25
+
+- Fixed status bar and sidebar "current account" usage to follow the account currently loaded by this VS Code window, not the latest disk `auth.json`.
+- Kept reload/revert prompts tied to live `auth.json`, so window-vs-live divergence is still explicit after switching accounts.
+- Changed startup flow to render cached local state first and kick off the first background usage refresh asynchronously, avoiding slow initial extension paint.
+
 ## [0.2.8] - 2026-03-25
 
 - Added a dedicated npm CLI package for `codex-accounts`, including the full-screen TUI and manual-only token refresh flow.
