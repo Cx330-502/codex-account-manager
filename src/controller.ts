@@ -759,9 +759,10 @@ export class CodexAccountsController implements vscode.Disposable {
   ): RestartState {
     const session = runtime.windowSessions.find((entry) => entry.id === this.windowId) ?? null;
     const currentWindowAccountId =
-      session?.runtimeAccountId ?? liveAuthState.accountId;
-    const thisWindowNeedsReload =
-      session != null && session.runtimeAccountId !== liveAuthState.accountId;
+      session?.runtimeAccountId ??
+      this.state.currentWindowAccount.accountId ??
+      liveAuthState.accountId;
+    const thisWindowNeedsReload = currentWindowAccountId !== liveAuthState.accountId;
     const canRevertToWindowAccount =
       thisWindowNeedsReload &&
       currentWindowAccountId != null &&
@@ -779,9 +780,12 @@ export class CodexAccountsController implements vscode.Disposable {
       liveAccountId: liveAuthState.accountId,
       liveAccountLabel: liveAuthState.label,
       switchedAt,
-      pendingWindowCount: runtime.windowSessions.filter(
-        (entry) => entry.runtimeAccountId !== liveAuthState.accountId,
-      ).length,
+      pendingWindowCount: Math.max(
+        runtime.windowSessions.filter(
+          (entry) => entry.runtimeAccountId !== liveAuthState.accountId,
+        ).length,
+        thisWindowNeedsReload ? 1 : 0,
+      ),
     };
   }
 

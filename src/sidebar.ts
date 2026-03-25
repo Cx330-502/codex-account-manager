@@ -807,7 +807,7 @@ export class CodexAccountsSidebarProvider
           !currentAccount && accounts.length === 0
             ? emptyState()
             : [
-                currentAccount ? renderCurrentSection(currentAccount) : "",
+                currentAccount ? renderCurrentSection(currentAccount, state.restart || null) : "",
                 renderOtherSection(otherAccounts, currentAccount),
               ].join("");
 
@@ -844,8 +844,9 @@ export class CodexAccountsSidebarProvider
             <div>
               <strong>Reload needed in this window</strong>
               <div class="restart-banner-copy">
-                This window is still using <strong>\${escapeHtml(currentLabel)}</strong>.
-                Live <code>auth.json</code> has already switched to <strong>\${escapeHtml(liveLabel)}</strong>.
+                Current window account: <strong>\${escapeHtml(currentLabel)}</strong>.
+                Disk live <code>auth.json</code>: <strong>\${escapeHtml(liveLabel)}</strong>.
+                These differ, so this window must reload before new Codex runs follow disk auth.
                 \${restart.switchedAt ? \`Switched \${escapeHtml(formatWhen(restart.switchedAt))}.\` : ""}
                 Pending windows: \${escapeHtml(String(restart.pendingWindowCount || 1))}.
               </div>
@@ -858,12 +859,17 @@ export class CodexAccountsSidebarProvider
         \`;
       }
 
-      function renderCurrentSection(account) {
+      function renderCurrentSection(account, restart) {
+        const diskLine =
+          restart && restart.thisWindowNeedsReload
+            ? \`<div class="section-copy">Disk live auth: <strong>\${escapeHtml(restart.liveAccountLabel || "different live auth")}</strong></div>\`
+            : '<div class="section-copy">Disk live auth matches this window</div>';
         return \`
           <section class="section">
             <div class="section-heading">
               <div class="section-title">Current Window Account</div>
-              <div class="section-copy">This window keeps using this account until reload</div>
+              <div class="section-copy">Current in-use account for this VS Code window</div>
+              \${diskLine}
             </div>
             \${renderCurrentCard(account)}
           </section>

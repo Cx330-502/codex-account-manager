@@ -90,10 +90,11 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     const currentLabel =
       state.restart.currentWindowAccountLabel ?? "current window account";
     const liveLabel = state.restart.liveAccountLabel ?? "different live auth";
-    this.restartItem.text = `$(warning) Reload: ${currentLabel} -> ${liveLabel}`;
+    this.restartItem.text = `$(warning) Reload: using ${currentLabel} | disk ${liveLabel}`;
     this.restartItem.tooltip =
-      `This window still uses ${currentLabel} until reload.\n` +
-      `Live auth.json now points to ${liveLabel}.\n` +
+      `Current window account: ${currentLabel}\n` +
+      `Disk live auth.json: ${liveLabel}\n` +
+      "These differ, so this window must reload before new Codex runs follow disk auth.\n" +
       `Pending windows: ${state.restart.pendingWindowCount}\n` +
       "Click to reload this VS Code window.";
     this.restartItem.show();
@@ -104,8 +105,8 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
     ) {
       this.revertItem.text = `$(history) Revert -> ${currentLabel}`;
       this.revertItem.tooltip =
-        `Write auth.json back to ${currentLabel} without reloading this window.\n` +
-        `Current live auth: ${liveLabel}.`;
+        `Write disk auth.json back to ${currentLabel} without reloading this window.\n` +
+        `Current disk live auth: ${liveLabel}.`;
       this.revertItem.command = {
         title: "Revert to Current Window Account",
         command: "codexAccounts.switchAccount",
@@ -163,10 +164,10 @@ function buildTooltip(
   ];
   if (state.restart.thisWindowNeedsReload) {
     lines.push(
-      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
+      `Reload needed: current window account is ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
     );
     lines.push(
-      `Live auth now points to ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
+      `Disk live auth.json is ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
     );
   }
   const usage = active.record.usage;
@@ -208,10 +209,10 @@ function buildUnavailableTooltip(
   ];
   if (state.restart.thisWindowNeedsReload) {
     lines.push(
-      `Reload needed: this window is still on ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
+      `Reload needed: current window account is ${state.restart.currentWindowAccountLabel ?? "the current window account"}.`,
     );
     lines.push(
-      `Live auth now points to ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
+      `Disk live auth.json is ${state.restart.liveAccountLabel ?? "a different login state"}${state.restart.switchedAt ? ` at ${state.restart.switchedAt}` : ""}.`,
     );
   }
   return lines.join("\n");
