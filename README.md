@@ -2,6 +2,13 @@
 
 一个 VS Code 扩展，用来管理多个 Codex / ChatGPT 官方账号快照。插件只切换 `~/.codex/auth.json`，因此本地 `sessions/`、`memories/`、`state_5.sqlite` 会天然保持共通，不会因为切账号而被分叉。
 
+仓库现在也提供同源 CLI：`codex-accounts`。CLI 是全屏 TUI，支持方向键上下选择、回车确认和静默状态刷新；默认是手动模式，可切到 `usage-auto`，但依然坚持“`usage` 可以自动刷新，`token refresh` 必须手动触发”。
+
+发布结构已经拆分：
+
+- VS Code 扩展 VSIX 只包含扩展本体，不再打包 TUI/CLI 入口
+- npm 包 `codex-account-manager` 只发布 CLI：`codex-accounts`
+
 ## 功能
 
 - 启动即显示底栏状态：VS Code 启动完成后自动激活，状态栏无需先打开侧边栏
@@ -35,6 +42,28 @@
 3. 在侧边栏里执行 `Switch / Refresh Usage / Reload Window / Revert auth.json / Import / Export / Start Login` 等操作
 4. 只要当前窗口所用账号和磁盘上的 live `auth.json` 不一致，就会看到明确的 `Reload Window` 和 `Revert auth.json` 提示
 5. `Start Login` 会先保存当前账号，再启动干净登录；登录新账号后，插件会自动捕获并纳入管理
+
+## CLI 使用
+
+- 构建后可直接运行：`node out/cli.js`
+- 安装到全局后可直接运行：`codex-accounts`
+- 查看帮助：`codex-accounts --help`
+- 交互方式：方向键上下移动，`Left` / `Right` 切换菜单和账号面板，`Enter` 确认，`Tab` 也可切换栏位，`Esc` 返回菜单，`q` 退出
+- CLI 配置保存在：`~/.codex/account-manager/cli-config.json`
+- `Reload from disk` 的意思是：重新读取本地账号快照、live `auth.json` 和已缓存 usage 状态，不会主动请求 usage/token 接口
+- CLI 支持两种模式：
+  - `manual-only`：默认模式，不做后台刷新，`usage` 和 `token` 都需要你手动触发
+  - `usage-auto`：仅在 CLI 正在运行时自动刷新 `usage`，但**绝不**自动 refresh token
+- 顶栏会显示当前 `HTTP proxy` / `HTTPS proxy` 状态，右侧账号表会对当前 live 账号显示 `LIVE` 和 `CURRENT ...` 强调
+- CLI 里支持：
+  - `Refresh usage`
+  - `Refresh token`
+  - `Switch account`
+  - `Save current auth`
+  - `Rename account`
+  - `Remove account`
+  - `Import bundle`
+  - `Export bundle`
 
 ## 额度显示说明
 

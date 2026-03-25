@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.8] - 2026-03-25
+
+- Added a dedicated npm CLI package for `codex-accounts`, including the full-screen TUI and manual-only token refresh flow.
+- Split packaging boundaries so VSIX builds no longer include the CLI/TUI entrypoint or CLI publish directory.
+- Updated CLI UX copy to `Reload from disk` and clarified local-only reload semantics in the docs.
+
 ## [0.2.6] - 2026-03-24
 
 - Added configurable sidebar account sorting by `5h`/`1w` reset time and remaining quota, with ascending and descending modes.

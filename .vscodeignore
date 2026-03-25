@@ -5,4 +5,10 @@ src/**
 tsconfig.json
 node_modules/**
 *.vsix
+*.tgz
 package-lock.json
+packages/**
+out/cli.js
+out/cli.js.map
+out/cliConfig.js
+out/cliConfig.js.map

@@ -5,8 +5,8 @@
     "lib": [
       "ES2022"
     ],
-    "outDir": "out",
-    "rootDir": "src",
+    "outDir": "./out",
+    "rootDir": "../../src",
     "sourceMap": true,
     "strict": true,
     "noImplicitOverride": true,
@@ -17,10 +17,12 @@
     "skipLibCheck": true
   },
   "include": [
-    "src/**/*.ts"
-  ],
-  "exclude": [
-    "src/cli.ts",
-    "src/cliConfig.ts"
+    "../../src/auth.ts",
+    "../../src/cli.ts",
+    "../../src/cliConfig.ts",
+    "../../src/store.ts",
+    "../../src/types.ts",
+    "../../src/usage.ts",
+    "../../src/usageFailure.ts"
   ]
 }

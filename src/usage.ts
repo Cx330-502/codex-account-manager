@@ -72,12 +72,20 @@ export interface UsageFetchResult {
   authRefreshed: boolean;
 }
 
+export interface UsageFetchOptions {
+  allowTokenRefresh?: boolean;
+}
+
 export class UsageService {
-  public async fetchUsage(auth: CodexAuthFile): Promise<UsageFetchResult> {
+  public async fetchUsage(
+    auth: CodexAuthFile,
+    options: UsageFetchOptions = {},
+  ): Promise<UsageFetchResult> {
+    const allowTokenRefresh = options.allowTokenRefresh ?? true;
     let workingAuth = cloneAuthFile(auth);
     let authRefreshed = false;
 
-    if (shouldProactivelyRefresh(workingAuth)) {
+    if (allowTokenRefresh && shouldProactivelyRefresh(workingAuth)) {
       workingAuth = await this.refreshAuthTokens(workingAuth);
       authRefreshed = true;
     }
@@ -108,7 +116,10 @@ export class UsageService {
         authRefreshed,
       };
     } catch (error) {
-      if (!shouldRetryWithRefresh(error, workingAuth, authRefreshed)) {
+      if (
+        !allowTokenRefresh ||
+        !shouldRetryWithRefresh(error, workingAuth, authRefreshed)
+      ) {
         throw error;
       }
 
@@ -128,6 +139,10 @@ export class UsageService {
         authRefreshed: true,
       };
     }
+  }
+
+  public async refreshTokens(auth: CodexAuthFile): Promise<CodexAuthFile> {
+    return this.refreshAuthTokens(auth);
   }
 
   private async requestJson<T>(
