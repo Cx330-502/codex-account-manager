@@ -1,9 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import {
+  defaultLoginConfig,
+  normalizeLoginConfig,
+  type LoginConfig,
+} from "./loginConfig";
+
 export type CliRunMode = "manual-only" | "usage-auto";
 
-export interface CliConfig {
+export interface CliConfig extends LoginConfig {
   runMode: CliRunMode;
   usageAutoRefreshIntervalMinutes: number;
 }
@@ -14,6 +20,7 @@ export function defaultCliConfig(): CliConfig {
   return {
     runMode: "manual-only",
     usageAutoRefreshIntervalMinutes: DEFAULT_INTERVAL_MINUTES,
+    ...defaultLoginConfig(),
   };
 }
 
@@ -67,6 +74,7 @@ export function normalizeCliConfig(
   return {
     runMode,
     usageAutoRefreshIntervalMinutes: interval ?? fallback.usageAutoRefreshIntervalMinutes,
+    ...normalizeLoginConfig(value),
   };
 }
 

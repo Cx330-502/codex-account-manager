@@ -34,3 +34,4 @@ codex-accounts --help
 - `Reload from disk` 只会重新读取本地账号快照、live auth 和已缓存 usage 状态，不会主动发 usage/token 网络请求
 - CLI 配置保存在：`~/.codex/account-manager/cli-config.json`
 - 账号数据仍然基于 `~/.codex/auth.json` 与 `~/.codex/account-manager/`
+- 设置里可配置专用登录浏览器命令和附加环境变量；`Start new login` / `Re-login replace` 会在离开 TUI 后用这些设置启动 `codex login`

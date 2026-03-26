@@ -220,6 +220,23 @@
           "minimum": 0,
           "description": "Minimum minutes between usage refresh attempts for the same account. Set to 0 to disable throttling."
         },
+        "codexAccounts.loginBrowserCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional BROWSER override used only for `codex login`. Point this to a wrapper script to force an isolated browser profile."
+        },
+        "codexAccounts.loginEnvironment": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "description": "Extra environment variables passed only to `codex login` and `codex logout`."
+        },
         "codexAccounts.statusBarAlignment": {
           "type": "string",
           "enum": [

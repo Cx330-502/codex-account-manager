@@ -24,6 +24,7 @@ import {
   type UsageFailureKind,
 } from "./usageFailure";
 import { UsageService, type UsageFetchResult } from "./usage";
+import { buildLoginEnvironmentOverrides } from "./loginConfig";
 
 export interface ControllerState {
   accounts: ManagedAccount[];
@@ -581,9 +582,14 @@ export class CodexAccountsController implements vscode.Disposable {
 
   private startLoginInTerminal(): void {
     const codexBinary = quoteForShell(this.resolveCodexBinary());
+    const config = vscode.workspace.getConfiguration("codexAccounts");
     const terminal = vscode.window.createTerminal({
       name: "Codex Login",
       cwd: this.store.codexHome,
+      env: buildLoginEnvironmentOverrides({
+        loginBrowserCommand: config.get<string>("loginBrowserCommand", ""),
+        loginEnvironment: config.get<Record<string, string>>("loginEnvironment", {}),
+      }),
     });
     terminal.show(true);
     terminal.sendText(`${codexBinary} logout`, true);

@@ -18,6 +18,7 @@
 - 多账号快照管理：把不同账号的 `auth.json` 保存到 `~/.codex/account-manager/accounts/*.json`
 - 自动识别新账号：监听 `~/.codex/auth.json`，登录新账号后自动纳入管理
 - 干净登录新账号：`Start Login` 会先保存当前账号，再执行一次干净的 `codex logout && codex login`
+- 可强制隔离登录浏览器：支持给登录流程单独设置 `BROWSER` 和额外环境变量，从而把 `codex login` 导向你自己的“纯净浏览器”包装脚本
 - Team / workspace 共用场景可分离：同一个 team / workspace 下的不同账号会按用户身份分别建档，不再错误合并
 - 一键切换账号：把选中的快照写回 `~/.codex/auth.json`
 - 一键导入 / 导出：导出为单个 JSON bundle，方便跨平台迁移
@@ -50,6 +51,7 @@
 - 查看帮助：`codex-accounts --help`
 - 交互方式：方向键上下移动，`Left` / `Right` 切换菜单和账号面板，`Enter` 确认，`Tab` 也可切换栏位，`Esc` 返回菜单，`q` 退出
 - CLI 配置保存在：`~/.codex/account-manager/cli-config.json`
+- CLI 也支持 `Start new login` / `Re-login replace`，并复用同一套登录浏览器配置
 - `Reload from disk` 的意思是：重新读取本地账号快照、live `auth.json` 和已缓存 usage 状态，不会主动请求 usage/token 接口
 - CLI 支持两种模式：
   - `manual-only`：默认模式，不做后台刷新，`usage` 和 `token` 都需要你手动触发
@@ -59,11 +61,27 @@
   - `Refresh usage`
   - `Refresh token`
   - `Switch account`
+  - `Start new login`
+  - `Re-login replace`
   - `Save current auth`
   - `Rename account`
   - `Remove account`
   - `Import bundle`
   - `Export bundle`
+
+## 隔离浏览器登录
+
+- 扩展会读取 VS Code 设置 `codexAccounts.loginBrowserCommand`，并把它作为 `BROWSER` 只注入到 `codex login`
+- 扩展还支持 `codexAccounts.loginEnvironment`，用于补充额外环境变量
+- CLI 会把同样的配置写入 `~/.codex/account-manager/cli-config.json`
+
+Windows 下推荐把 `codexAccounts.loginBrowserCommand` 指向你自己的 PowerShell 或 `.bat` 包装器。包装器收到登录 URL 后，再用类似下面的方式启动 Chrome：
+
+```powershell
+chrome.exe --incognito --user-data-dir="$tempPath" $LoginUrl
+```
+
+这样 `codex login` 触发的浏览器打开动作就会进入独立 profile，而不是复用你平时的 Chrome 会话。
 
 ## 额度显示说明
 

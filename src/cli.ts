@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 
 import blessed from "blessed";
 import { Command } from "commander";
@@ -13,6 +14,7 @@ import {
   writeCliConfig,
   type CliRunMode,
 } from "./cliConfig";
+import { buildLoginEnvironmentOverrides } from "./loginConfig";
 import { CodexAccountStore } from "./store";
 import type { ManagedAccount, UsageWindowSummary } from "./types";
 import { UsageService } from "./usage";
@@ -25,6 +27,7 @@ type MenuActionId =
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
+  | "startLogin"
   | "saveCurrentAuth"
   | "renameAccount"
   | "removeAccount"
@@ -36,6 +39,7 @@ type AccountActionId =
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
+  | "reloginAccount"
   | "renameAccount"
   | "removeAccount"
   | "back";
@@ -71,6 +75,7 @@ const MENU_ITEMS: MenuItem[] = [
   { id: "refreshUsage", label: "Refresh usage" },
   { id: "refreshToken", label: "Refresh token" },
   { id: "switchAccount", label: "Switch account" },
+  { id: "startLogin", label: "Start new login" },
   { id: "saveCurrentAuth", label: "Save current auth" },
   { id: "renameAccount", label: "Rename account" },
   { id: "removeAccount", label: "Remove account" },
@@ -364,6 +369,9 @@ class CodexAccountsCliApp {
         case "switchAccount":
           await this.handleSwitchAccount();
           break;
+        case "startLogin":
+          await this.handleStartLogin();
+          break;
         case "saveCurrentAuth":
           await this.handleSaveCurrentAuth();
           break;
@@ -645,6 +653,19 @@ class CodexAccountsCliApp {
           label: `Auto usage interval: ${this.config.usageAutoRefreshIntervalMinutes} min`,
           value: "interval",
         },
+        {
+          label: this.config.loginBrowserCommand
+            ? "Login browser command: configured"
+            : "Login browser command: default",
+          value: "browser",
+        },
+        {
+          label:
+            Object.keys(this.config.loginEnvironment).length > 0
+              ? `Login env JSON: ${Object.keys(this.config.loginEnvironment).length} key(s)`
+              : "Login env JSON: none",
+          value: "env",
+        },
         { label: "Back", value: "back" },
       ],
       0,
@@ -676,6 +697,62 @@ class CodexAccountsCliApp {
       await writeCliConfig(this.store.managerRoot, this.config);
       this.restartAutoRefreshLoop();
       this.setStatus("success", `Run mode updated to ${mode}.`);
+      return;
+    }
+
+    if (action === "browser") {
+      const browserCommand = await this.promptInput(
+        "Login browser command",
+        "Set BROWSER for codex login. Leave empty to use the system default browser.",
+        this.config.loginBrowserCommand,
+      );
+      if (browserCommand === null) {
+        this.setStatus("info", "Settings unchanged.");
+        return;
+      }
+
+      this.config = normalizeCliConfig({
+        ...this.config,
+        loginBrowserCommand: browserCommand,
+      });
+      await writeCliConfig(this.store.managerRoot, this.config);
+      this.setStatus(
+        "success",
+        this.config.loginBrowserCommand
+          ? "Login browser command updated."
+          : "Login browser command cleared.",
+      );
+      return;
+    }
+
+    if (action === "env") {
+      const envText = await this.promptInput(
+        "Login env JSON",
+        "JSON object of extra env vars passed to codex login, for example {\"FOO\":\"bar\"}.",
+        JSON.stringify(this.config.loginEnvironment),
+      );
+      if (envText === null) {
+        this.setStatus("info", "Settings unchanged.");
+        return;
+      }
+
+      let parsed: unknown = {};
+      if (envText.trim()) {
+        parsed = JSON.parse(envText);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Login env JSON must be an object.");
+      }
+
+      this.config = normalizeCliConfig({
+        ...this.config,
+        loginEnvironment: parsed as Record<string, string>,
+      });
+      await writeCliConfig(this.store.managerRoot, this.config);
+      this.setStatus(
+        "success",
+        `Login env updated with ${Object.keys(this.config.loginEnvironment).length} key(s).`,
+      );
       return;
     }
 
@@ -725,6 +802,7 @@ class CodexAccountsCliApp {
         { label: "Refresh usage", value: "refreshUsage" },
         { label: "Refresh token", value: "refreshToken" },
         { label: "Switch account", value: "switchAccount" },
+        { label: "Re-login replace", value: "reloginAccount" },
         { label: "Rename account", value: "renameAccount" },
         { label: "Remove account", value: "removeAccount" },
         { label: "Back", value: "back" },
@@ -749,6 +827,9 @@ class CodexAccountsCliApp {
           await this.refreshAccounts();
           this.selectAccountById(account.record.id);
           this.setStatus("success", `Switched live auth to ${getAccountLabel(account.record)}.`);
+          break;
+        case "reloginAccount":
+          await this.handleReloginAccount(account);
           break;
         case "renameAccount":
           await this.handleRenameAccount(account);
@@ -829,6 +910,94 @@ class CodexAccountsCliApp {
     return this.accounts.find((account) => account.record.id === selectedId) ?? null;
   }
 
+  private async handleStartLogin(): Promise<void> {
+    const shouldContinue = await this.confirm(
+      "Start new login",
+      "This will leave the TUI, run `codex logout` and `codex login`, then auto-capture the new auth snapshot. Continue?",
+    );
+    if (!shouldContinue) {
+      this.setStatus("info", "Start login canceled.");
+      return;
+    }
+
+    const currentRecord = await this.store.captureCurrentAuth("manual");
+    await this.runExternalLoginFlow({
+      replaceAccount: null,
+      savedRecordLabel: currentRecord ? getAccountLabel(currentRecord) : null,
+    });
+  }
+
+  private async handleReloginAccount(account: ManagedAccount): Promise<void> {
+    const shouldContinue = await this.confirm(
+      "Re-login replace",
+      `This will leave the TUI, run a clean login, and replace ${getAccountLabel(account.record)} with the newly written auth. Continue?`,
+    );
+    if (!shouldContinue) {
+      this.setStatus("info", "Re-login canceled.");
+      return;
+    }
+
+    if (!account.isActive) {
+      await this.store.switchToAccount(account.record.id);
+    }
+
+    await this.runExternalLoginFlow({
+      replaceAccount: account,
+      savedRecordLabel: null,
+    });
+  }
+
+  private async runExternalLoginFlow(options: {
+    replaceAccount: ManagedAccount | null;
+    savedRecordLabel: string | null;
+  }): Promise<void> {
+    this.shutdown();
+
+    try {
+      const env = {
+        ...process.env,
+        ...buildLoginEnvironmentOverrides(this.config),
+      };
+
+      if (options.savedRecordLabel) {
+        console.log(`Saved ${options.savedRecordLabel} first.`);
+      }
+      console.log("Starting clean Codex login...");
+
+      await runInteractiveCommand("codex", ["logout"], this.codexHome, env, true);
+      const loginExitCode = await runInteractiveCommand(
+        "codex",
+        ["login"],
+        this.codexHome,
+        env,
+        false,
+      );
+      if (loginExitCode !== 0) {
+        throw new Error(`codex login exited with code ${loginExitCode}.`);
+      }
+
+      const currentAuth = await this.store.readCurrentAuth();
+      if (!currentAuth) {
+        throw new Error(`No auth.json found at ${this.store.authPath} after login.`);
+      }
+
+      if (options.replaceAccount) {
+        const record = await this.store.replaceAccountAuth(
+          options.replaceAccount.record.id,
+          currentAuth,
+        );
+        console.log(`Re-login complete. Replaced account with ${getAccountLabel(record)}.`);
+        return;
+      }
+
+      const record = await this.store.saveSnapshotFromAuth(currentAuth, "auto");
+      console.log(`Login complete. Captured ${getAccountLabel(record)}.`);
+    } catch (error) {
+      console.error(toErrorMessage(error));
+      process.exitCode = 1;
+    }
+  }
+
   private async refreshAccounts(): Promise<void> {
     const previouslySelectedId = this.getSelectedAccount()?.record.id ?? null;
     this.accounts = await this.store.listAccounts();
@@ -893,6 +1062,10 @@ class CodexAccountsCliApp {
   }
 
   private updateUi(): void {
+    if (this.shuttingDown) {
+      return;
+    }
+
     const proxyState = getProxyStateSummary();
     const focusLabel =
       this.focusPane === "menu" ? "LEFT MENU" : "RIGHT ACCOUNTS";
@@ -1362,6 +1535,41 @@ async function main(options: CliOptions): Promise<void> {
   const codexHome = resolveCodexHome(options.codexHome ?? "");
   const app = new CodexAccountsCliApp(codexHome, options.mode);
   await app.run();
+}
+
+function runInteractiveCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  ignoreExitCode: boolean,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: "inherit",
+      shell: false,
+    });
+
+    child.once("error", (error) => {
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      if (signal) {
+        reject(new Error(`${command} ${args.join(" ")} exited due to signal ${signal}.`));
+        return;
+      }
+
+      const exitCode = code ?? 0;
+      if (!ignoreExitCode && exitCode !== 0) {
+        resolve(exitCode);
+        return;
+      }
+
+      resolve(exitCode);
+    });
+  });
 }
 
 const program = new Command();
