@@ -136,3 +136,68 @@ export interface SharedStateInfo {
   memoriesPath: string;
   sqlitePath: string;
 }
+
+export interface BinaryDependencyStatus {
+  name: string;
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  error: string | null;
+}
+
+export interface CliDependencyStatus {
+  codex: BinaryDependencyStatus;
+  tmux: BinaryDependencyStatus;
+  sqlite3: BinaryDependencyStatus;
+}
+
+export type ManagedThreadState =
+  | "not_opened_in_manager"
+  | "opened_in_manager"
+  | "stale_binding";
+
+export interface CodexThreadRecord {
+  id: string;
+  title: string;
+  cwd: string;
+  gitBranch: string | null;
+  model: string | null;
+  updatedAt: number;
+  createdAt: number;
+  archived: boolean;
+  firstUserMessage: string;
+}
+
+export interface WorkspaceWindowRecord {
+  cwd: string;
+  windowId: string;
+  windowName: string;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export interface WorkspacePaneRecord {
+  paneId: string;
+  windowId: string;
+  cwd: string;
+  threadId: string | null;
+  threadTitle: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+  lastAttachedAt: string | null;
+}
+
+export interface ManagerWorkspaceRegistry {
+  version: 1;
+  sessionName: string;
+  sessionId: string | null;
+  windows: WorkspaceWindowRecord[];
+  panes: WorkspacePaneRecord[];
+  updatedAt: string;
+}
+
+export interface ManagedThreadSummary {
+  thread: CodexThreadRecord;
+  managerState: ManagedThreadState;
+  pane: WorkspacePaneRecord | null;
+}

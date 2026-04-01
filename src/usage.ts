@@ -622,9 +622,16 @@ function parseLastRefreshMs(value: string | number | undefined): number {
     return Number.isFinite(value) ? value : NaN;
   }
   if (typeof value === "string") {
-    const asNumber = Number.parseFloat(value);
-    if (Number.isFinite(asNumber)) {
-      return asNumber;
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return NaN;
+    }
+    const isNumericLiteral = /^-?\d+(\.\d+)?$/.test(trimmed);
+    if (isNumericLiteral) {
+      const asNumber = Number.parseFloat(trimmed);
+      if (Number.isFinite(asNumber)) {
+        return asNumber;
+      }
     }
     const parsed = Date.parse(value);
     return Number.isNaN(parsed) ? NaN : parsed;

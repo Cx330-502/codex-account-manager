@@ -6,14 +6,19 @@ export type CliRunMode = "manual-only" | "usage-auto";
 export interface CliConfig {
   runMode: CliRunMode;
   usageAutoRefreshIntervalMinutes: number;
+  managerSessionName: string;
+  defaultThreadDirectory: string;
 }
 
 const DEFAULT_INTERVAL_MINUTES = 10;
+const DEFAULT_MANAGER_SESSION_NAME = "codex-manager-workspace";
 
 export function defaultCliConfig(): CliConfig {
   return {
     runMode: "manual-only",
     usageAutoRefreshIntervalMinutes: DEFAULT_INTERVAL_MINUTES,
+    managerSessionName: DEFAULT_MANAGER_SESSION_NAME,
+    defaultThreadDirectory: "",
   };
 }
 
@@ -67,6 +72,8 @@ export function normalizeCliConfig(
   return {
     runMode,
     usageAutoRefreshIntervalMinutes: interval ?? fallback.usageAutoRefreshIntervalMinutes,
+    managerSessionName: normalizeString(value?.managerSessionName) ?? fallback.managerSessionName,
+    defaultThreadDirectory: normalizeString(value?.defaultThreadDirectory) ?? "",
   };
 }
 
@@ -81,4 +88,13 @@ function clampInterval(value: unknown): number | null {
   }
 
   return rounded;
+}
+
+function normalizeString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }

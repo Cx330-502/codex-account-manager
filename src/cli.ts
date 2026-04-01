@@ -6,6 +6,10 @@ import blessed from "blessed";
 import { Command } from "commander";
 
 import { getAccountLabel, resolveCodexHome } from "./auth";
+import { detectCliDependencies, runInteractiveCommand } from "./cliSystem";
+import {
+  CodexThreadService,
+} from "./codexThreads";
 import {
   defaultCliConfig,
   normalizeCliConfig,
@@ -14,7 +18,19 @@ import {
   type CliRunMode,
 } from "./cliConfig";
 import { CodexAccountStore } from "./store";
-import type { ManagedAccount, UsageWindowSummary } from "./types";
+import {
+  TmuxWorkspaceService,
+  buildCodexCommand,
+} from "./tmuxWorkspace";
+import type {
+  CliDependencyStatus,
+  CodexThreadRecord,
+  ManagedAccount,
+  ManagedThreadSummary,
+  ManagerWorkspaceRegistry,
+  UsageWindowSummary,
+  WorkspacePaneRecord,
+} from "./types";
 import { UsageService } from "./usage";
 import { encodeUsageFailure, formatUsageFailureSummary } from "./usageFailure";
 
@@ -22,6 +38,9 @@ type StatusTone = "info" | "success" | "warning" | "danger";
 type FocusPane = "menu" | "accounts";
 type MenuActionId =
   | "refreshDashboard"
+  | "openManagerWorkspace"
+  | "startCodexThread"
+  | "browseCodexThreads"
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
@@ -36,6 +55,7 @@ type AccountActionId =
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
+  | "startThread"
   | "renameAccount"
   | "removeAccount"
   | "back";
@@ -68,6 +88,9 @@ interface SelectOption<T extends string> {
 
 const MENU_ITEMS: MenuItem[] = [
   { id: "refreshDashboard", label: "Reload data from disk" },
+  { id: "openManagerWorkspace", label: "Open manager workspace" },
+  { id: "startCodexThread", label: "Start new Codex thread" },
+  { id: "browseCodexThreads", label: "Browse Codex threads" },
   { id: "refreshUsage", label: "Refresh usage" },
   { id: "refreshToken", label: "Refresh token" },
   { id: "switchAccount", label: "Switch account" },
@@ -83,6 +106,7 @@ const MENU_ITEMS: MenuItem[] = [
 class CodexAccountsCliApp {
   private readonly store: CodexAccountStore;
   private readonly usageService = new UsageService();
+  private readonly threadService: CodexThreadService;
   private readonly screen: blessed.Widgets.Screen;
   private readonly headerBox: blessed.Widgets.BoxElement;
   private readonly statusBox: blessed.Widgets.BoxElement;
@@ -93,6 +117,9 @@ class CodexAccountsCliApp {
 
   private config = defaultCliConfig();
   private accounts: ManagedAccount[] = [];
+  private workspaceRegistry: ManagerWorkspaceRegistry | null = null;
+  private dependencies: CliDependencyStatus | null = null;
+  private managedThreads: ManagedThreadSummary[] = [];
   private statusMessage: StatusMessage = {
     tone: "info",
     text: "Ready.",
@@ -109,6 +136,7 @@ class CodexAccountsCliApp {
     initialMode?: CliRunMode,
   ) {
     this.store = new CodexAccountStore(codexHome);
+    this.threadService = new CodexThreadService(this.store.sqlitePath);
     if (initialMode) {
       this.config = normalizeCliConfig({
         ...this.config,
@@ -268,7 +296,8 @@ class CodexAccountsCliApp {
       runMode: this.config.runMode,
     });
     await writeCliConfig(this.store.managerRoot, this.config);
-    await this.refreshAccounts();
+    this.dependencies = await detectCliDependencies();
+    await this.refreshDashboard();
     this.startAutoRefreshLoop();
     this.updateUi();
     this.menuList.focus();
@@ -352,8 +381,17 @@ class CodexAccountsCliApp {
     await this.runExclusive(async () => {
       switch (actionId) {
         case "refreshDashboard":
-          await this.refreshAccounts();
+          await this.refreshDashboard();
           this.setStatus("info", "Reloaded accounts and usage data from disk.");
+          break;
+        case "openManagerWorkspace":
+          await this.handleOpenManagerWorkspace();
+          break;
+        case "startCodexThread":
+          await this.handleStartCodexThread();
+          break;
+        case "browseCodexThreads":
+          await this.handleBrowseCodexThreads();
           break;
         case "refreshUsage":
           await this.handleRefreshUsage("manual");
@@ -546,6 +584,81 @@ class CodexAccountsCliApp {
     this.setStatus("success", `Switched live auth to ${getAccountLabel(account.record)}.`);
   }
 
+  private async handleOpenManagerWorkspace(): Promise<void> {
+    this.ensureWorkspaceDependencies();
+    const workspace = this.getWorkspaceService();
+    this.workspaceRegistry = await workspace.loadRegistry();
+    this.workspaceRegistry = await workspace.reconcileRegistry(this.workspaceRegistry);
+    const cwd =
+      this.config.defaultThreadDirectory.trim() || process.cwd();
+    const ensured = await workspace.ensureWorkspaceSession(path.resolve(cwd));
+    this.workspaceRegistry.sessionId = ensured.sessionId;
+    await workspace.saveRegistry(this.workspaceRegistry);
+    await this.attachToWorkspace();
+  }
+
+  private async handleStartCodexThread(account?: ManagedAccount): Promise<void> {
+    this.ensureWorkspaceDependencies();
+    const targetAccount = account ?? (await this.pickAccount("Start Codex thread"));
+    if (!targetAccount) {
+      this.setStatus("info", "Start thread canceled.");
+      return;
+    }
+
+    const cwdInput = await this.promptInput(
+      "Target directory",
+      "Directory for the new Codex thread",
+      this.config.defaultThreadDirectory || process.cwd(),
+    );
+    if (!cwdInput) {
+      this.setStatus("info", "Start thread canceled.");
+      return;
+    }
+
+    const cwd = path.resolve(cwdInput);
+    const prompt = await this.promptInput(
+      "Initial prompt",
+      "Optional initial prompt for the new Codex thread",
+      "",
+    );
+    if (prompt === null) {
+      this.setStatus("info", "Start thread canceled.");
+      return;
+    }
+
+    await this.launchNewThreadInWorkspace(targetAccount, cwd, prompt.trim() || null);
+  }
+
+  private async handleBrowseCodexThreads(): Promise<void> {
+    this.ensureWorkspaceDependencies();
+    await this.refreshDashboard();
+    if (this.managedThreads.length === 0) {
+      this.setStatus("warning", "No non-archived Codex threads found.");
+      return;
+    }
+
+    const picked = await this.pickOption<string>(
+      "Codex threads",
+      this.managedThreads.map((entry) => ({
+        label: formatThreadOption(entry),
+        value: entry.thread.id,
+      })),
+      0,
+    );
+    if (!picked) {
+      this.setStatus("info", "Thread browser canceled.");
+      return;
+    }
+
+    const selected = this.managedThreads.find((entry) => entry.thread.id === picked) ?? null;
+    if (!selected) {
+      this.setStatus("warning", "Selected Codex thread is no longer available.");
+      return;
+    }
+
+    await this.openExistingThreadInWorkspace(selected);
+  }
+
   private async handleSaveCurrentAuth(): Promise<void> {
     const record = await this.store.captureCurrentAuth("manual");
     if (!record) {
@@ -645,6 +758,16 @@ class CodexAccountsCliApp {
           label: `Auto usage interval: ${this.config.usageAutoRefreshIntervalMinutes} min`,
           value: "interval",
         },
+        {
+          label: `Manager tmux session: ${this.config.managerSessionName}`,
+          value: "sessionName",
+        },
+        {
+          label: this.config.defaultThreadDirectory
+            ? `Default thread dir: ${truncate(this.config.defaultThreadDirectory, 24)}`
+            : "Default thread dir: current shell cwd",
+          value: "defaultDir",
+        },
         { label: "Back", value: "back" },
       ],
       0,
@@ -676,6 +799,50 @@ class CodexAccountsCliApp {
       await writeCliConfig(this.store.managerRoot, this.config);
       this.restartAutoRefreshLoop();
       this.setStatus("success", `Run mode updated to ${mode}.`);
+      return;
+    }
+
+    if (action === "sessionName") {
+      const sessionName = await this.promptInput(
+        "Manager tmux session",
+        "Single tmux session name used by the workspace manager",
+        this.config.managerSessionName,
+      );
+      if (sessionName === null) {
+        this.setStatus("info", "Settings unchanged.");
+        return;
+      }
+      this.config = normalizeCliConfig({
+        ...this.config,
+        managerSessionName: sessionName,
+      });
+      await writeCliConfig(this.store.managerRoot, this.config);
+      this.workspaceRegistry = null;
+      this.setStatus("success", `Manager tmux session updated to ${this.config.managerSessionName}.`);
+      return;
+    }
+
+    if (action === "defaultDir") {
+      const defaultDir = await this.promptInput(
+        "Default thread directory",
+        "Leave empty to default to the current shell working directory.",
+        this.config.defaultThreadDirectory,
+      );
+      if (defaultDir === null) {
+        this.setStatus("info", "Settings unchanged.");
+        return;
+      }
+      this.config = normalizeCliConfig({
+        ...this.config,
+        defaultThreadDirectory: defaultDir.trim(),
+      });
+      await writeCliConfig(this.store.managerRoot, this.config);
+      this.setStatus(
+        "success",
+        this.config.defaultThreadDirectory
+          ? `Default thread directory updated to ${this.config.defaultThreadDirectory}.`
+          : "Default thread directory cleared.",
+      );
       return;
     }
 
@@ -725,6 +892,7 @@ class CodexAccountsCliApp {
         { label: "Refresh usage", value: "refreshUsage" },
         { label: "Refresh token", value: "refreshToken" },
         { label: "Switch account", value: "switchAccount" },
+        { label: "Start new Codex thread here", value: "startThread" },
         { label: "Rename account", value: "renameAccount" },
         { label: "Remove account", value: "removeAccount" },
         { label: "Back", value: "back" },
@@ -749,6 +917,9 @@ class CodexAccountsCliApp {
           await this.refreshAccounts();
           this.selectAccountById(account.record.id);
           this.setStatus("success", `Switched live auth to ${getAccountLabel(account.record)}.`);
+          break;
+        case "startThread":
+          await this.handleStartCodexThread(account);
           break;
         case "renameAccount":
           await this.handleRenameAccount(account);
@@ -829,6 +1000,33 @@ class CodexAccountsCliApp {
     return this.accounts.find((account) => account.record.id === selectedId) ?? null;
   }
 
+  private async refreshDashboard(): Promise<void> {
+    await this.refreshAccounts();
+    if (!this.dependencies) {
+      return;
+    }
+
+    if (!this.dependencies.sqlite3.available) {
+      this.managedThreads = [];
+      this.workspaceRegistry = this.workspaceRegistry
+        ? {
+            ...this.workspaceRegistry,
+            panes: [],
+            windows: [],
+          }
+        : null;
+      return;
+    }
+
+    const workspace = this.getWorkspaceService();
+    this.workspaceRegistry = await workspace.loadRegistry();
+    this.workspaceRegistry = await workspace.reconcileRegistry(this.workspaceRegistry);
+    await this.tryResolvePendingPanes();
+    await workspace.saveRegistry(this.workspaceRegistry);
+    const threadRecords = await this.threadService.listNonArchivedThreads();
+    this.managedThreads = this.buildManagedThreadSummaries(threadRecords);
+  }
+
   private async refreshAccounts(): Promise<void> {
     const previouslySelectedId = this.getSelectedAccount()?.record.id ?? null;
     this.accounts = await this.store.listAccounts();
@@ -892,10 +1090,53 @@ class CodexAccountsCliApp {
     this.accountsTable.setData(rows);
   }
 
+  private buildManagedThreadSummaries(
+    threads: CodexThreadRecord[],
+  ): ManagedThreadSummary[] {
+    const registry = this.workspaceRegistry;
+    if (!registry) {
+      return threads.map((thread) => ({
+        thread,
+        managerState: "not_opened_in_manager",
+        pane: null,
+      }));
+    }
+
+    const livePaneIds = new Set(registry.panes.map((pane) => pane.paneId));
+    return threads.map((thread) => {
+      const pane = registry.panes.find((entry) => entry.threadId === thread.id) ?? null;
+      if (!pane) {
+        return {
+          thread,
+          managerState: "not_opened_in_manager",
+          pane: null,
+        };
+      }
+
+      return {
+        thread,
+        managerState: livePaneIds.has(pane.paneId)
+          ? "opened_in_manager"
+          : "stale_binding",
+        pane,
+      };
+    });
+  }
+
   private updateUi(): void {
     const proxyState = getProxyStateSummary();
     const focusLabel =
       this.focusPane === "menu" ? "LEFT MENU" : "RIGHT ACCOUNTS";
+    const dependencySummary = this.dependencies
+      ? [
+          formatDependencyLabel("codex", this.dependencies.codex.available),
+          formatDependencyLabel("tmux", this.dependencies.tmux.available),
+          formatDependencyLabel("sqlite3", this.dependencies.sqlite3.available),
+        ].join(" ")
+      : "deps: loading";
+    const workspaceSummary = this.workspaceRegistry
+      ? `workspace: ${this.config.managerSessionName} | threads: ${this.managedThreads.length}`
+      : `workspace: ${this.config.managerSessionName}`;
     this.headerBox.setContent(
       [
         `{bold}Codex Accounts CLI{/bold}`,
@@ -909,6 +1150,8 @@ class CodexAccountsCliApp {
           `CODEX_HOME: ${truncate(this.codexHome, 46)}`,
           `HTTP proxy: ${proxyState.http}`,
           `HTTPS proxy: ${proxyState.https}`,
+          dependencySummary,
+          workspaceSummary,
         ].join(" | "),
     );
 
@@ -955,7 +1198,7 @@ class CodexAccountsCliApp {
     const rightPaneHint =
       this.focusPane === "accounts"
         ? "Focus: RIGHT ACCOUNTS | Up/Down move | Enter account actions | Left menu | Tab menu | Esc menu | q quit"
-        : "Focus: LEFT MENU | Up/Down move | Enter select | Right accounts | Tab accounts | q quit";
+        : "Focus: LEFT MENU | Up/Down move | Enter select | Open workspace/start thread/browse threads | q quit";
     this.helpBox.setContent(` ${rightPaneHint}`);
   }
 
@@ -1011,7 +1254,7 @@ class CodexAccountsCliApp {
     }
 
     await this.runExclusive(async () => {
-      await this.refreshAccounts();
+      await this.refreshDashboard();
       await this.handleRefreshUsage("auto");
     });
   }
@@ -1246,6 +1489,234 @@ class CodexAccountsCliApp {
     }
     this.screen.destroy();
   }
+
+  private ensureWorkspaceDependencies(): void {
+    if (!this.dependencies?.codex.available) {
+      throw new Error("`codex` is not available. Install Codex before using workspace actions.");
+    }
+    if (!this.dependencies.tmux.available) {
+      throw new Error("`tmux` is not available. Install tmux before using workspace actions.");
+    }
+    if (!this.dependencies.sqlite3.available) {
+      throw new Error("`sqlite3` is required to read local Codex thread metadata.");
+    }
+  }
+
+  private getWorkspaceService(): TmuxWorkspaceService {
+    return new TmuxWorkspaceService(
+      this.store.managerRoot,
+      this.config.managerSessionName,
+    );
+  }
+
+  private async attachToWorkspace(targetPaneId?: string | null): Promise<void> {
+    this.shutdown();
+    if (targetPaneId) {
+      await runInteractiveCommand("tmux", ["select-pane", "-t", targetPaneId]);
+    }
+    await runInteractiveCommand("tmux", [
+      "attach-session",
+      "-t",
+      this.config.managerSessionName,
+    ]);
+  }
+
+  private async launchNewThreadInWorkspace(
+    account: ManagedAccount,
+    cwd: string,
+    prompt: string | null,
+  ): Promise<void> {
+    const workspace = this.getWorkspaceService();
+    const previousAuth = await this.store.readCurrentAuth();
+    const previousAccountId = this.accounts.find((entry) => entry.isActive)?.record.id ?? null;
+    const launchStartedAt = Date.now();
+    let paneRecord: WorkspacePaneRecord | null = null;
+
+    try {
+      await this.store.switchToAccount(account.record.id);
+      this.workspaceRegistry = await workspace.loadRegistry();
+      this.workspaceRegistry = await workspace.reconcileRegistry(this.workspaceRegistry);
+      const ensured = await workspace.ensureWorkspaceSession(cwd);
+      this.workspaceRegistry.sessionId = ensured.sessionId;
+
+      const pane = await workspace.createThreadPane({
+        registry: this.workspaceRegistry,
+        cwd,
+        command: buildCodexCommand({
+          cwd,
+          prompt,
+        }),
+      });
+      const now = new Date().toISOString();
+      this.workspaceRegistry = workspace.updateWindowRecord(this.workspaceRegistry, {
+        cwd,
+        windowId: pane.windowId,
+        windowName: pane.windowName,
+        createdAt: now,
+        lastSeenAt: now,
+      });
+      paneRecord = {
+        paneId: pane.paneId,
+        windowId: pane.windowId,
+        cwd,
+        threadId: null,
+        threadTitle: prompt,
+        createdAt: now,
+        lastSeenAt: now,
+        lastAttachedAt: now,
+      };
+      this.workspaceRegistry = workspace.upsertPaneRecord(this.workspaceRegistry, paneRecord);
+      await workspace.saveRegistry(this.workspaceRegistry);
+
+      const bound = await this.tryBindPaneToRecentThread(
+        paneRecord,
+        launchStartedAt,
+        prompt,
+      );
+      await this.store.writeCurrentAuth(previousAuth);
+      if (previousAccountId && previousAccountId !== account.record.id) {
+        await this.refreshAccounts();
+      }
+      await this.attachToWorkspace(bound?.paneId ?? paneRecord.paneId);
+    } catch (error) {
+      await this.store.writeCurrentAuth(previousAuth);
+      throw error;
+    }
+  }
+
+  private async openExistingThreadInWorkspace(
+    selected: ManagedThreadSummary,
+  ): Promise<void> {
+    const workspace = this.getWorkspaceService();
+    this.workspaceRegistry = await workspace.loadRegistry();
+    this.workspaceRegistry = await workspace.reconcileRegistry(this.workspaceRegistry);
+
+    if (selected.managerState === "opened_in_manager" && selected.pane) {
+      await workspace.saveRegistry(this.workspaceRegistry);
+      await this.attachToWorkspace(selected.pane.paneId);
+      return;
+    }
+
+    const cwd = selected.thread.cwd || this.config.defaultThreadDirectory || process.cwd();
+    const ensured = await workspace.ensureWorkspaceSession(cwd);
+    this.workspaceRegistry.sessionId = ensured.sessionId;
+    const pane = await workspace.createThreadPane({
+      registry: this.workspaceRegistry,
+      cwd,
+      command: buildCodexCommand({
+        cwd,
+        resumeThreadId: selected.thread.id,
+      }),
+    });
+    const now = new Date().toISOString();
+    this.workspaceRegistry = workspace.updateWindowRecord(this.workspaceRegistry, {
+      cwd,
+      windowId: pane.windowId,
+      windowName: pane.windowName,
+      createdAt: now,
+      lastSeenAt: now,
+    });
+    this.workspaceRegistry = workspace.upsertPaneRecord(this.workspaceRegistry, {
+      paneId: pane.paneId,
+      windowId: pane.windowId,
+      cwd,
+      threadId: selected.thread.id,
+      threadTitle: selected.thread.title,
+      createdAt: now,
+      lastSeenAt: now,
+      lastAttachedAt: now,
+    });
+    await workspace.saveRegistry(this.workspaceRegistry);
+    await this.attachToWorkspace(pane.paneId);
+  }
+
+  private async tryResolvePendingPanes(): Promise<void> {
+    const registry = this.workspaceRegistry;
+    if (!registry) {
+      return;
+    }
+
+    const workspace = this.getWorkspaceService();
+    const boundThreadIds = new Set(
+      registry.panes
+        .map((pane) => pane.threadId)
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    for (const pane of registry.panes) {
+      if (pane.threadId) {
+        continue;
+      }
+      const bound = await this.tryBindPaneToRecentThread(pane, Date.parse(pane.createdAt), null, boundThreadIds);
+      if (bound?.threadId) {
+        boundThreadIds.add(bound.threadId);
+      }
+    }
+
+    await workspace.saveRegistry(registry);
+  }
+
+  private async tryBindPaneToRecentThread(
+    pane: WorkspacePaneRecord,
+    startedAt: number,
+    prompt: string | null,
+    existingBoundThreadIds?: Set<string>,
+  ): Promise<WorkspacePaneRecord | null> {
+    const registry = this.workspaceRegistry;
+    if (!registry) {
+      return null;
+    }
+
+    const exclude = existingBoundThreadIds
+      ? new Set(existingBoundThreadIds)
+      : new Set(
+          registry.panes
+            .map((entry) => entry.threadId)
+            .filter((value): value is string => Boolean(value)),
+        );
+    const candidate = await this.waitForRecentThreadCandidate({
+      cwd: pane.cwd,
+      prompt,
+      startedAt,
+      exclude,
+    });
+    if (!candidate) {
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const nextPane: WorkspacePaneRecord = {
+      ...pane,
+      threadId: candidate.id,
+      threadTitle: candidate.title,
+      lastSeenAt: now,
+      lastAttachedAt: pane.lastAttachedAt ?? now,
+    };
+    const workspace = this.getWorkspaceService();
+    this.workspaceRegistry = workspace.upsertPaneRecord(registry, nextPane);
+    return nextPane;
+  }
+
+  private async waitForRecentThreadCandidate(options: {
+    cwd: string;
+    startedAt: number;
+    prompt: string | null;
+    exclude: Set<string>;
+  }): Promise<CodexThreadRecord | null> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const candidate = await this.threadService.findRecentThreadCandidate({
+        cwd: options.cwd,
+        startedAt: options.startedAt,
+        prompt: options.prompt,
+        excludeThreadIds: options.exclude,
+      });
+      if (candidate) {
+        return candidate;
+      }
+      await sleep(1_000);
+    }
+    return null;
+  }
 }
 
 function findWindow(
@@ -1325,6 +1796,22 @@ function formatProxyValue(value: string | undefined): string {
   }
 }
 
+function formatDependencyLabel(name: string, available: boolean): string {
+  return available ? `${name}:on` : `${name}:off`;
+}
+
+function formatThreadOption(entry: ManagedThreadSummary): string {
+  const state =
+    entry.managerState === "opened_in_manager"
+      ? "OPEN"
+      : entry.managerState === "stale_binding"
+        ? "STALE"
+        : "NEW";
+  const title = truncate(entry.thread.title || "(untitled thread)", 44);
+  const cwd = truncate(entry.thread.cwd || "-", 24);
+  return `[${state}] ${title} | ${cwd} | ${formatUnixTimestamp(entry.thread.updatedAt)}`;
+}
+
 function getListSelectedIndex(
   list: blessed.Widgets.ListElement | blessed.Widgets.ListTableElement,
 ): number {
@@ -1356,6 +1843,19 @@ function formatToneLabel(status: StatusMessage): string {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatUnixTimestamp(epochSeconds: number): string {
+  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) {
+    return "--";
+  }
+  return formatTimestamp(new Date(epochSeconds * 1000).toISOString());
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function main(options: CliOptions): Promise<void> {

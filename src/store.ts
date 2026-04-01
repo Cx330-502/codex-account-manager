@@ -54,6 +54,16 @@ export class CodexAccountStore {
     return this.readJsonFile<CodexAuthFile>(this.authPath);
   }
 
+  public async writeCurrentAuth(auth: CodexAuthFile | null): Promise<void> {
+    await this.ensureReady();
+    if (!auth) {
+      await fs.rm(this.authPath, { force: true });
+      return;
+    }
+
+    await this.writeJsonFile(this.authPath, auth);
+  }
+
   public async captureCurrentAuth(source: AccountSource): Promise<AccountRecord | null> {
     const auth = await this.readCurrentAuth();
     if (!auth) {

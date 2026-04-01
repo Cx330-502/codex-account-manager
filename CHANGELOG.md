@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [0.2.11] - 2026-04-01
+
+- Added CLI workspace management primitives for Codex threads, including tmux session/pane orchestration and local registry tracking.
+- Added CLI thread discovery from local `state_5.sqlite`, with actions to start new threads and reopen existing threads in the manager workspace.
+- Added CLI dependency checks (`codex`, `tmux`, `sqlite3`) and corresponding settings for manager session name and default thread directory.
+- Fixed usage refresh timestamp parsing so ISO `last_refresh` values no longer trigger unnecessary token refresh calls that can cascade into `refresh_token_reused` failures.
+
 ## [0.2.9] - 2026-03-25
 
 - Fixed status bar and sidebar "current account" usage to follow the account currently loaded by this VS Code window, not the latest disk `auth.json`.

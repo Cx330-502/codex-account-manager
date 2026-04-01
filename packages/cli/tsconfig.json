@@ -20,7 +20,10 @@
     "../../src/auth.ts",
     "../../src/cli.ts",
     "../../src/cliConfig.ts",
+    "../../src/cliSystem.ts",
+    "../../src/codexThreads.ts",
     "../../src/store.ts",
+    "../../src/tmuxWorkspace.ts",
     "../../src/types.ts",
     "../../src/usage.ts",
     "../../src/usageFailure.ts"
