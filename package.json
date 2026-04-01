@@ -268,7 +268,7 @@
     "watch": "tsc -w -p ./",
     "package": "vsce package --no-dependencies",
     "pack:cli": "npm run build:cli && npm pack ./packages/cli",
-    "publish:cli": "npm run build:cli && npm publish ./packages/cli"
+    "publish:cli": "npm run build:cli && npm publish ./packages/cli --registry=https://registry.npmjs.org"
   },
   "devDependencies": {
     "@types/blessed": "^0.1.27",

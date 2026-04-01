@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import blessed from "blessed";
@@ -76,6 +77,11 @@ interface CliOptions {
   mode?: CliRunMode;
 }
 
+interface CliPackageMetadata {
+  name: string;
+  version: string;
+}
+
 interface MenuItem {
   id: MenuActionId;
   label: string;
@@ -130,6 +136,11 @@ class CodexAccountsCliApp {
   private modalOpen = false;
   private focusPane: FocusPane = "menu";
   private shuttingDown = false;
+  private cliPackageMetadata: CliPackageMetadata = {
+    name: "codex-account-manager",
+    version: "unknown",
+  };
+  private cliUpdateSummary = "update: pending";
 
   public constructor(
     private readonly codexHome: string,
@@ -290,6 +301,7 @@ class CodexAccountsCliApp {
 
   public async run(): Promise<void> {
     await this.store.ensureReady();
+    this.cliPackageMetadata = await this.loadCliPackageMetadata();
     const diskConfig = await readCliConfig(this.store.managerRoot);
     this.config = normalizeCliConfig({
       ...diskConfig,
@@ -302,6 +314,7 @@ class CodexAccountsCliApp {
     this.updateUi();
     this.menuList.focus();
     this.screen.render();
+    void this.checkForCliUpdate();
 
     await new Promise<void>((resolve) => {
       this.screen.once("destroy", () => resolve());
@@ -1150,6 +1163,7 @@ class CodexAccountsCliApp {
           `CODEX_HOME: ${truncate(this.codexHome, 46)}`,
           `HTTP proxy: ${proxyState.http}`,
           `HTTPS proxy: ${proxyState.https}`,
+          this.cliUpdateSummary,
           dependencySummary,
           workspaceSummary,
         ].join(" | "),
@@ -1245,6 +1259,52 @@ class CodexAccountsCliApp {
       this.autoRefreshTimer = undefined;
     }
     this.startAutoRefreshLoop();
+    this.updateUi();
+  }
+
+  private async loadCliPackageMetadata(): Promise<CliPackageMetadata> {
+    const fallback: CliPackageMetadata = {
+      name: "codex-account-manager",
+      version: "unknown",
+    };
+
+    try {
+      const packagePath = path.join(__dirname, "..", "package.json");
+      const raw = await fs.readFile(packagePath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      const name = normalizeNonEmptyString(parsed.name) ?? fallback.name;
+      const version = normalizeNonEmptyString(parsed.version) ?? fallback.version;
+      return { name, version };
+    } catch {
+      return fallback;
+    }
+  }
+
+  private async checkForCliUpdate(): Promise<void> {
+    this.cliUpdateSummary = "update: checking";
+    this.updateUi();
+
+    try {
+      const latestVersion = await fetchLatestNpmVersion(this.cliPackageMetadata.name);
+      const compareResult = compareSemanticVersions(
+        latestVersion,
+        this.cliPackageMetadata.version,
+      );
+      if (compareResult > 0) {
+        this.cliUpdateSummary = truncate(
+          `update: ${this.cliPackageMetadata.version} -> ${latestVersion}; run npm i -g ${this.cliPackageMetadata.name}@latest`,
+          92,
+        );
+      } else {
+        this.cliUpdateSummary = `update: latest (${this.cliPackageMetadata.version})`;
+      }
+    } catch {
+      this.cliUpdateSummary = "update: check failed";
+    }
+
     this.updateUi();
   }
 
@@ -1839,6 +1899,75 @@ function formatToneLabel(status: StatusMessage): string {
     default:
       return "{cyan-fg}[INFO]{/cyan-fg}";
   }
+}
+
+async function fetchLatestNpmVersion(packageName: string): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch(
+      `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
+      {
+        headers: {
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = (await response.json()) as { version?: unknown };
+    const version = normalizeNonEmptyString(payload.version);
+    if (!version) {
+      throw new Error("Missing version in npm response.");
+    }
+    return version;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function compareSemanticVersions(left: string, right: string): number {
+  const leftParts = parseSemanticVersion(left);
+  const rightParts = parseSemanticVersion(right);
+  if (!leftParts || !rightParts) {
+    return left.localeCompare(right);
+  }
+
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] > rightParts[index]) {
+      return 1;
+    }
+    if (leftParts[index] < rightParts[index]) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+function parseSemanticVersion(value: string): [number, number, number] | null {
+  const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  if (!match) {
+    return null;
+  }
+
+  const major = Number.parseInt(match[1] ?? "", 10);
+  const minor = Number.parseInt(match[2] ?? "", 10);
+  const patch = Number.parseInt(match[3] ?? "", 10);
+  if (!Number.isFinite(major) || !Number.isFinite(minor) || !Number.isFinite(patch)) {
+    return null;
+  }
+  return [major, minor, patch];
 }
 
 function toErrorMessage(error: unknown): string {
