@@ -12,12 +12,17 @@ type SidebarMessage =
   | { type: "ready" }
   | { type: "refresh" }
   | { type: "saveCurrentAccount" }
+  | { type: "switchApiAccount" }
+  | { type: "addApiAccount" }
+  | { type: "editApiAccount"; id: string }
+  | { type: "checkApiHealth"; id?: string }
   | { type: "importBundle" }
   | { type: "exportBundle" }
   | { type: "reloadWindow" }
   | { type: "startLogin" }
   | { type: "reloginAccount"; id: string }
   | { type: "openCodexHome" }
+  | { type: "openLiveApiConfig" }
   | { type: "switchAccount"; id: string }
   | { type: "renameAccount"; id: string }
   | { type: "removeAccount"; id: string }
@@ -83,6 +88,18 @@ export class CodexAccountsSidebarProvider
       case "saveCurrentAccount":
         await vscode.commands.executeCommand("codexAccounts.saveCurrentAccount");
         break;
+      case "switchApiAccount":
+        await vscode.commands.executeCommand("codexAccounts.switchApiAccount");
+        break;
+      case "addApiAccount":
+        await vscode.commands.executeCommand("codexAccounts.addApiAccount");
+        break;
+      case "editApiAccount":
+        await vscode.commands.executeCommand("codexAccounts.editApiAccount", message.id);
+        break;
+      case "checkApiHealth":
+        await vscode.commands.executeCommand("codexAccounts.checkApiHealth", message.id);
+        break;
       case "importBundle":
         await vscode.commands.executeCommand("codexAccounts.importBundle");
         break;
@@ -103,6 +120,9 @@ export class CodexAccountsSidebarProvider
         break;
       case "openCodexHome":
         await vscode.commands.executeCommand("codexAccounts.openCodexHome");
+        break;
+      case "openLiveApiConfig":
+        await vscode.commands.executeCommand("codexAccounts.openLiveApiConfig");
         break;
       case "switchAccount":
         await vscode.commands.executeCommand("codexAccounts.switchAccount", message.id);
@@ -144,10 +164,18 @@ export class CodexAccountsSidebarProvider
       ? toViewAccount(state.currentWindowAccount.account)
       : {
           id: state.currentWindowAccount.accountId,
+          kind: "auth",
           label: state.currentWindowAccount.label ?? "Unknown window account",
           email: null,
           authMode: null,
           accountId: state.currentWindowAccount.accountId,
+          apiBaseUrl: null,
+          apiKeyMasked: null,
+          models: [],
+          modelCount: 0,
+          healthStatus: null,
+          healthCheckedAt: null,
+          healthError: null,
           isActive: false,
           isManaged: false,
           planType: null,
@@ -167,10 +195,11 @@ export class CodexAccountsSidebarProvider
       generatedAt: new Date().toISOString(),
       lastError: state.lastError,
       sharedHint:
-        "Switches auth only. sessions / memories / state_5.sqlite stay shared.",
+        "Auth switches update auth.json. API switches update api-live.json. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
       restart: state.restart,
       currentWindowAccount,
+      liveApiAccount: state.liveApiAccount ? toViewAccount(state.liveApiAccount) : null,
       accounts: accounts.map((account) => toViewAccount(account)),
     };
   }
@@ -783,10 +812,13 @@ export class CodexAccountsSidebarProvider
 
         const tools = [
           tool("Save Current", "Capture current auth.json", "saveCurrentAccount"),
+          tool("Switch API", "Quick switch to a managed API config", "switchApiAccount"),
+          tool("Add API", "Create a managed API config", "addApiAccount"),
           tool("New Login", "Login and auto-capture", "startLogin"),
           tool("Import Bundle", "Bring accounts from file", "importBundle"),
           tool("Export Bundle", "Portable account backup", "exportBundle"),
           tool("Refresh All", "Reload accounts and usage", "refresh"),
+          tool("Live API File", "Open api-live.json", "openLiveApiConfig"),
           tool("Open Codex Home", "~/.codex files", "openCodexHome"),
         ].join("");
 
@@ -814,8 +846,8 @@ export class CodexAccountsSidebarProvider
         root.innerHTML = \`
           <section class="hero">
             <div class="hero-title">
-              <strong>Codex Multi-Account</strong>
-              <span class="badge">auth.json only</span>
+              <strong>Codex Account Manager</strong>
+              <span class="badge">AUTH + API</span>
             </div>
             <div class="hero-copy">\${escapeHtml(state.sharedHint || "")}</div>
             <div class="hero-paths">
@@ -895,7 +927,11 @@ export class CodexAccountsSidebarProvider
       }
 
       function renderCurrentCard(account) {
+        if (account.kind === "api") {
+          return renderApiCard(account, true);
+        }
         const badges = [];
+        badges.push('<span class="badge">AUTH</span>');
         badges.push('<span class="badge active">Current</span>');
         if (account.isActive) {
           badges.push('<span class="badge">Live auth.json</span>');
@@ -955,7 +991,11 @@ export class CodexAccountsSidebarProvider
       }
 
       function renderCompactCard(account) {
+        if (account.kind === "api") {
+          return renderApiCard(account, false);
+        }
         const badges = [];
+        badges.push('<span class="badge">AUTH</span>');
         if (account.planType) {
           badges.push(\`<span class="badge">\${escapeHtml(account.planType)}</span>\`);
         }
@@ -990,6 +1030,63 @@ export class CodexAccountsSidebarProvider
               <button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">Switch</button>
               <button class="card-button-secondary" data-action="refreshUsage" data-id="\${escapeAttr(account.id)}">Refresh</button>
               <button class="card-button-secondary" data-action="reloginAccount" data-id="\${escapeAttr(account.id)}">Re-login replace</button>
+              <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
+              <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>
+            </div>
+          </article>
+        \`;
+      }
+
+      function renderApiCard(account, expanded) {
+        const badges = ['<span class="badge">API</span>'];
+        if (expanded) {
+          badges.push('<span class="badge active">Managed</span>');
+        }
+        if (account.isActive) {
+          badges.push('<span class="badge">Live API</span>');
+        }
+
+        const checkedAt = account.healthCheckedAt
+          ? \`Checked \${escapeHtml(formatWhen(account.healthCheckedAt))}\`
+          : "Health not checked yet";
+        const healthText =
+          account.healthStatus === "healthy"
+            ? \`Healthy · \${escapeHtml(String(account.modelCount || 0))} model(s)\`
+            : account.healthError
+              ? \`Error · \${escapeHtml(account.healthError)}\`
+              : "Pending health check";
+
+        return \`
+          <article class="account-card \${expanded ? "current-card" : "compact-card"}">
+            <div class="account-head">
+              <div>
+                <div class="account-title">\${escapeHtml(account.label)}</div>
+                <div class="account-email">\${escapeHtml(account.apiBaseUrl || "Unknown API base URL")}</div>
+              </div>
+              <div class="badge-row">\${badges.join("")}</div>
+            </div>
+            <div class="\${expanded ? "usage-grid current-grid" : "compact-metrics"}">
+              <div class="\${expanded ? "stat span-2 status-neutral" : "metric-chip span-2"}">
+                <div class="\${expanded ? "stat-label" : "metric-label"}">Models</div>
+                <div class="\${expanded ? "stat-value" : "metric-value"}">\${escapeHtml(String(account.modelCount || 0))}</div>
+                <div class="\${expanded ? "stat-meta" : "metric-meta"}">\${escapeHtml(checkedAt)}</div>
+                \${expanded ? \`<div class="stat-submeta">\${escapeHtml(account.apiKeyMasked || "API key saved")}</div>\` : ""}
+              </div>
+              <div class="\${expanded ? "stat span-2" : "metric-chip span-2"} \${account.healthStatus === "healthy" ? "status-good" : account.healthError ? "status-danger" : ""}">
+                <div class="\${expanded ? "stat-label" : "metric-label"}">Health</div>
+                <div class="\${expanded ? "stat-value" : "metric-value"}">\${healthText}</div>
+                <div class="\${expanded ? "stat-meta" : "metric-meta"}">\${escapeHtml(account.apiKeyMasked || "")}</div>
+                \${expanded ? \`<div class="stat-submeta">\${escapeHtml((account.models || []).slice(0, 3).map((model) => model.id).join(", ") || "No models discovered yet")}</div>\` : ""}
+              </div>
+            </div>
+            <div class="account-foot \${expanded ? "" : "compact-foot"}">
+              <div>\${escapeHtml(checkedAt)}</div>
+              <div>\${account.lastCapturedAt ? \`Captured \${escapeHtml(formatWhen(account.lastCapturedAt))}\${account.lastUsedAt ? \` · Switched \${escapeHtml(formatWhen(account.lastUsedAt))}\` : ""}\` : "No local snapshot time"}</div>
+            </div>
+            <div class="account-actions \${expanded ? "" : "compact-actions"}">
+              <button class="card-button" data-action="switchAccount" data-id="\${escapeAttr(account.id)}">\${account.isActive ? "Live API" : "Switch API"}</button>
+              <button class="card-button-secondary" data-action="checkApiHealth" data-id="\${escapeAttr(account.id)}">Check health</button>
+              <button class="card-button-secondary" data-action="editApiAccount" data-id="\${escapeAttr(account.id)}">Edit</button>
               <button class="card-button-secondary" data-action="renameAccount" data-id="\${escapeAttr(account.id)}">Rename</button>
               <button class="card-button-secondary" data-action="removeAccount" data-id="\${escapeAttr(account.id)}">Remove</button>
             </div>
@@ -1359,10 +1456,21 @@ function toViewAccount(account: ManagedAccount): Record<string, unknown> {
 
   return {
     id: account.record.id,
+    kind: account.record.kind,
     label: getAccountLabel(account.record),
     email: account.record.email ?? null,
     authMode: account.record.authMode ?? null,
     accountId: account.record.chatgptAccountId ?? account.record.accountId ?? null,
+    apiBaseUrl: account.record.apiBaseUrl ?? null,
+    apiKeyMasked: account.record.apiKeyMasked ?? null,
+    models: account.record.models ?? [],
+    modelCount: account.record.models?.length ?? 0,
+    healthStatus: account.record.health?.status ?? null,
+    healthCheckedAt:
+      account.record.lastHealthCheckedAt ??
+      account.record.health?.checkedAt ??
+      null,
+    healthError: account.record.healthError ?? null,
     isActive: account.isActive,
     isManaged: true,
     planType: account.record.usage?.planType ?? null,

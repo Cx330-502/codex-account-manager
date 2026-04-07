@@ -6,6 +6,7 @@ import * as path from "node:path";
 import blessed from "blessed";
 import { Command } from "commander";
 
+import { ApiService } from "./api";
 import { getAccountLabel, resolveCodexHome } from "./auth";
 import { detectCliDependencies, runInteractiveCommand } from "./cliSystem";
 import {
@@ -24,6 +25,7 @@ import {
   buildCodexCommand,
 } from "./tmuxWorkspace";
 import type {
+  ApiConfigFile,
   CliDependencyStatus,
   CodexThreadRecord,
   ManagedAccount,
@@ -42,6 +44,9 @@ type MenuActionId =
   | "openManagerWorkspace"
   | "startCodexThread"
   | "browseCodexThreads"
+  | "addApiAccount"
+  | "openLiveApiConfig"
+  | "checkApiHealth"
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
@@ -53,6 +58,8 @@ type MenuActionId =
   | "settings"
   | "exit";
 type AccountActionId =
+  | "checkApiHealth"
+  | "editApiAccount"
   | "refreshUsage"
   | "refreshToken"
   | "switchAccount"
@@ -97,6 +104,9 @@ const MENU_ITEMS: MenuItem[] = [
   { id: "openManagerWorkspace", label: "Open manager workspace" },
   { id: "startCodexThread", label: "Start new Codex thread" },
   { id: "browseCodexThreads", label: "Browse Codex threads" },
+  { id: "addApiAccount", label: "Add API account" },
+  { id: "checkApiHealth", label: "Check API health" },
+  { id: "openLiveApiConfig", label: "Open live API config" },
   { id: "refreshUsage", label: "Refresh usage" },
   { id: "refreshToken", label: "Refresh token" },
   { id: "switchAccount", label: "Switch account" },
@@ -112,6 +122,7 @@ const MENU_ITEMS: MenuItem[] = [
 class CodexAccountsCliApp {
   private readonly store: CodexAccountStore;
   private readonly usageService = new UsageService();
+  private readonly apiService = new ApiService();
   private readonly threadService: CodexThreadService;
   private readonly screen: blessed.Widgets.Screen;
   private readonly headerBox: blessed.Widgets.BoxElement;
@@ -406,6 +417,15 @@ class CodexAccountsCliApp {
         case "browseCodexThreads":
           await this.handleBrowseCodexThreads();
           break;
+        case "addApiAccount":
+          await this.handleAddApiAccount();
+          break;
+        case "checkApiHealth":
+          await this.handleCheckApiHealth();
+          break;
+        case "openLiveApiConfig":
+          await this.handleOpenLiveApiConfig();
+          break;
         case "refreshUsage":
           await this.handleRefreshUsage("manual");
           break;
@@ -443,14 +463,15 @@ class CodexAccountsCliApp {
   }
 
   private async handleRefreshUsage(reason: "manual" | "auto"): Promise<void> {
-    if (this.accounts.length === 0) {
-      this.setStatus("warning", "No managed accounts found.");
+    const authAccounts = this.accounts.filter((account) => account.record.kind === "auth");
+    if (authAccounts.length === 0) {
+      this.setStatus("warning", "No managed auth accounts found.");
       return;
     }
 
     const targets =
       reason === "auto"
-        ? this.accounts
+        ? authAccounts
         : await this.pickRefreshTargets("Refresh usage", true);
     if (targets.length === 0) {
       if (reason === "manual") {
@@ -478,7 +499,10 @@ class CodexAccountsCliApp {
 
     for (const account of targets) {
       try {
-        const result = await this.usageService.fetchUsage(account.auth, {
+        if (account.payload.kind !== "auth") {
+          continue;
+        }
+        const result = await this.usageService.fetchUsage(account.payload.auth, {
           allowTokenRefresh: false,
         });
         await this.store.setUsage(account.record.id, result.usage, null);
@@ -522,8 +546,9 @@ class CodexAccountsCliApp {
   }
 
   private async handleRefreshTokens(): Promise<void> {
-    if (this.accounts.length === 0) {
-      this.setStatus("warning", "No managed accounts found.");
+    const authAccounts = this.accounts.filter((account) => account.record.kind === "auth");
+    if (authAccounts.length === 0) {
+      this.setStatus("warning", "No managed auth accounts found.");
       return;
     }
 
@@ -547,7 +572,10 @@ class CodexAccountsCliApp {
 
     for (const target of targets) {
       try {
-        const refreshedAuth = await this.usageService.refreshTokens(target.auth);
+        if (target.payload.kind !== "auth") {
+          continue;
+        }
+        const refreshedAuth = await this.usageService.refreshTokens(target.payload.auth);
         await this.store.updateAccountAuth(target.record.id, refreshedAuth);
         const usageResult = await this.usageService.fetchUsage(refreshedAuth, {
           allowTokenRefresh: false,
@@ -594,7 +622,12 @@ class CodexAccountsCliApp {
     await this.store.switchToAccount(account.record.id);
     await this.refreshAccounts();
     this.selectAccountById(account.record.id);
-    this.setStatus("success", `Switched live auth to ${getAccountLabel(account.record)}.`);
+    this.setStatus(
+      "success",
+      account.record.kind === "auth"
+        ? `Switched live auth to ${getAccountLabel(account.record)}.`
+        : `Switched live API config to ${getAccountLabel(account.record)}.`,
+    );
   }
 
   private async handleOpenManagerWorkspace(): Promise<void> {
@@ -615,6 +648,10 @@ class CodexAccountsCliApp {
     const targetAccount = account ?? (await this.pickAccount("Start Codex thread"));
     if (!targetAccount) {
       this.setStatus("info", "Start thread canceled.");
+      return;
+    }
+    if (targetAccount.record.kind !== "auth") {
+      this.setStatus("warning", "Starting a Codex thread is only supported for auth accounts.");
       return;
     }
 
@@ -670,6 +707,92 @@ class CodexAccountsCliApp {
     }
 
     await this.openExistingThreadInWorkspace(selected);
+  }
+
+  private async handleAddApiAccount(): Promise<void> {
+    const draft = await this.promptForApiConfig();
+    if (!draft) {
+      this.setStatus("info", "Add API account canceled.");
+      return;
+    }
+
+    const result = await this.validateApiDraft(draft);
+    const record = await this.store.createApiAccount(result.config, "manual");
+    await this.store.setApiHealth(record.id, result.config, result.health, result.healthError);
+    await this.refreshAccounts();
+    this.selectAccountById(record.id);
+    this.setStatus(
+      result.healthError ? "warning" : "success",
+      result.healthError
+        ? `Saved API account ${getAccountLabel(record)} with warning: ${result.healthError}`
+        : `Saved API account ${getAccountLabel(record)} with ${result.config.models.length} models.`,
+    );
+  }
+
+  private async handleCheckApiHealth(target?: ManagedAccount): Promise<void> {
+    const account = target ?? (await this.pickAccount("Check API health", "api"));
+    if (!account) {
+      this.setStatus("info", "API health check canceled.");
+      return;
+    }
+    if (account.payload.kind !== "api") {
+      this.setStatus("warning", "API health is only available for API accounts.");
+      return;
+    }
+
+    const result = await this.validateApiDraft(account.payload.api);
+    await this.store.setApiHealth(
+      account.record.id,
+      result.config,
+      result.health,
+      result.healthError,
+    );
+    await this.refreshAccounts();
+    this.selectAccountById(account.record.id);
+    this.setStatus(
+      result.healthError ? "warning" : "success",
+      result.healthError
+        ? `API health failed for ${getAccountLabel(account.record)}: ${result.healthError}`
+        : `API healthy for ${getAccountLabel(account.record)} with ${result.config.models.length} models.`,
+    );
+  }
+
+  private async handleEditApiAccount(target?: ManagedAccount): Promise<void> {
+    const account = target ?? (await this.pickAccount("Edit API account", "api"));
+    if (!account) {
+      this.setStatus("info", "Edit API account canceled.");
+      return;
+    }
+    if (account.payload.kind !== "api") {
+      this.setStatus("warning", "Only API accounts can be edited here.");
+      return;
+    }
+
+    const draft = await this.promptForApiConfig(account.payload.api);
+    if (!draft) {
+      this.setStatus("info", "Edit API account canceled.");
+      return;
+    }
+
+    const result = await this.validateApiDraft(draft);
+    await this.store.setApiHealth(
+      account.record.id,
+      result.config,
+      result.health,
+      result.healthError,
+    );
+    await this.refreshAccounts();
+    this.selectAccountById(account.record.id);
+    this.setStatus(
+      result.healthError ? "warning" : "success",
+      result.healthError
+        ? `Updated API account ${getAccountLabel(account.record)} with warning: ${result.healthError}`
+        : `Updated API account ${getAccountLabel(account.record)} with ${result.config.models.length} models.`,
+    );
+  }
+
+  private async handleOpenLiveApiConfig(): Promise<void> {
+    this.setStatus("info", `Live API config: ${this.store.apiConfigPath}`);
   }
 
   private async handleSaveCurrentAuth(): Promise<void> {
@@ -901,15 +1024,7 @@ class CodexAccountsCliApp {
 
     const action = await this.pickOption<AccountActionId>(
       `Account: ${getAccountLabel(account.record)}`,
-      [
-        { label: "Refresh usage", value: "refreshUsage" },
-        { label: "Refresh token", value: "refreshToken" },
-        { label: "Switch account", value: "switchAccount" },
-        { label: "Start new Codex thread here", value: "startThread" },
-        { label: "Rename account", value: "renameAccount" },
-        { label: "Remove account", value: "removeAccount" },
-        { label: "Back", value: "back" },
-      ],
+      buildAccountActionOptions(account),
       0,
     );
 
@@ -922,6 +1037,12 @@ class CodexAccountsCliApp {
         case "refreshUsage":
           await this.handleRefreshUsageForAccounts([account], "manual");
           break;
+        case "checkApiHealth":
+          await this.handleCheckApiHealth(account);
+          break;
+        case "editApiAccount":
+          await this.handleEditApiAccount(account);
+          break;
         case "refreshToken":
           await this.handleRefreshTokensForAccounts([account]);
           break;
@@ -929,7 +1050,12 @@ class CodexAccountsCliApp {
           await this.store.switchToAccount(account.record.id);
           await this.refreshAccounts();
           this.selectAccountById(account.record.id);
-          this.setStatus("success", `Switched live auth to ${getAccountLabel(account.record)}.`);
+          this.setStatus(
+            "success",
+            account.record.kind === "auth"
+              ? `Switched live auth to ${getAccountLabel(account.record)}.`
+              : `Switched live API config to ${getAccountLabel(account.record)}.`,
+          );
           break;
         case "startThread":
           await this.handleStartCodexThread(account);
@@ -963,7 +1089,8 @@ class CodexAccountsCliApp {
     title: string,
     allowAll: boolean,
   ): Promise<ManagedAccount[]> {
-    const active = this.accounts.find((account) => account.isActive) ?? null;
+    const candidates = this.accounts.filter((account) => account.record.kind === "auth");
+    const active = candidates.find((account) => account.isActive) ?? null;
     const options: SelectOption<"active" | "specific" | "all">[] = [];
     if (active) {
       options.push({
@@ -990,27 +1117,39 @@ class CodexAccountsCliApp {
       return [active];
     }
     if (selected === "specific") {
-      const account = await this.pickAccount(title);
+      const account = await this.pickAccount(title, "auth");
       return account ? [account] : [];
     }
-    return allowAll ? this.accounts : [];
+    return allowAll ? candidates : [];
   }
 
-  private async pickAccount(title: string): Promise<ManagedAccount | null> {
-    if (this.accounts.length === 0) {
+  private async pickAccount(
+    title: string,
+    kind?: "auth" | "api",
+  ): Promise<ManagedAccount | null> {
+    const candidates = kind
+      ? this.accounts.filter((account) => account.record.kind === kind)
+      : this.accounts;
+    if (candidates.length === 0) {
       return null;
     }
 
-    const options = this.accounts.map((account) => ({
-      label: `${account.isActive ? "* " : ""}${getAccountLabel(account.record)}`,
+    const options = candidates.map((account) => ({
+      label: `${account.isActive ? "* " : ""}[${account.record.kind.toUpperCase()}] ${getAccountLabel(account.record)}`,
       value: account.record.id,
     }));
-    const defaultIndex = Math.max(getListSelectedIndex(this.accountsTable) - 1, 0);
+    const selectedAccount = this.getSelectedAccount();
+    const defaultIndex = Math.max(
+      selectedAccount
+        ? candidates.findIndex((account) => account.record.id === selectedAccount.record.id)
+        : 0,
+      0,
+    );
     const selectedId = await this.pickOption(title, options, defaultIndex);
     if (!selectedId) {
       return null;
     }
-    return this.accounts.find((account) => account.record.id === selectedId) ?? null;
+    return candidates.find((account) => account.record.id === selectedId) ?? null;
   }
 
   private async refreshDashboard(): Promise<void> {
@@ -1055,45 +1194,50 @@ class CodexAccountsCliApp {
   private renderAccountsTable(): void {
     const narrow = (this.screen.width as number) < 120;
     const header = narrow
-      ? ["#", "Live", "Account", "5h", "1w", "Status"]
-      : ["#", "Live", "Account", "Plan", "5h", "1w", "5h reset", "1w reset", "Status"];
+      ? ["#", "Type", "Live", "Account", "Info", "Status"]
+      : ["#", "Type", "Live", "Account", "Info", "5h", "1w", "Recent", "Status"];
     const rows = [header];
 
     if (this.accounts.length === 0) {
       rows.push(
         narrow
-          ? ["-", "-", "No accounts", "-", "-", "-"]
-          : ["-", "-", "No accounts", "-", "-", "-", "-", "-", "-"],
+          ? ["-", "-", "-", "No accounts", "-", "-"]
+          : ["-", "-", "-", "No accounts", "-", "-", "-", "-", "-"],
       );
     } else {
       for (const [index, account] of this.accounts.entries()) {
         const fiveHour = findWindow(account, "5h");
         const weekly = findWindow(account, "1w");
-        const status = truncate(buildUsageStatus(account), narrow ? 18 : 34);
+        const status = truncate(buildAccountStatus(account), narrow ? 18 : 34);
         const accountLabel = account.isActive
           ? `CURRENT ${getAccountLabel(account.record)}`
           : getAccountLabel(account.record);
-        const liveMarker = account.isActive ? "LIVE" : "";
+        const liveMarker = account.isActive
+          ? account.record.kind === "auth"
+            ? "AUTH"
+            : "API"
+          : "";
+        const info = truncate(buildAccountInfo(account), narrow ? 16 : 20);
 
         if (narrow) {
           rows.push([
             String(index + 1),
+            account.record.kind.toUpperCase(),
             liveMarker,
             truncate(accountLabel, 22),
-            formatRemaining(fiveHour),
-            formatRemaining(weekly),
+            info,
             status,
           ]);
         } else {
           rows.push([
             String(index + 1),
+            account.record.kind.toUpperCase(),
             liveMarker,
             truncate(accountLabel, 28),
-            truncate(account.record.usage?.planType ?? account.record.usage?.creditLabel ?? "--", 10),
+            info,
             formatRemaining(fiveHour),
             formatRemaining(weekly),
-            formatReset(fiveHour),
-            formatReset(weekly),
+            truncate(account.record.lastHealthCheckedAt ?? account.record.usageCheckedAt ?? "--", 18),
             status,
           ]);
         }
@@ -1495,6 +1639,60 @@ class CodexAccountsCliApp {
     });
   }
 
+  private async promptForApiConfig(
+    initial?: Partial<ApiConfigFile>,
+  ): Promise<Pick<ApiConfigFile, "baseUrl" | "apiKey"> | null> {
+    const baseUrl = await this.promptInput(
+      "API base URL",
+      "Base URL used for /v1/models",
+      initial?.baseUrl ?? "",
+    );
+    if (baseUrl === null) {
+      return null;
+    }
+
+    const apiKey = await this.promptInput(
+      "API key",
+      "API key for this endpoint",
+      initial?.apiKey ?? "",
+    );
+    if (apiKey === null) {
+      return null;
+    }
+
+    return {
+      baseUrl,
+      apiKey,
+    };
+  }
+
+  private async validateApiDraft(
+    draft: Pick<ApiConfigFile, "baseUrl" | "apiKey">,
+  ): Promise<{
+    config: ApiConfigFile;
+    health: ManagedAccount["record"]["health"] | undefined;
+    healthError: string | null;
+  }> {
+    try {
+      const result = await this.apiService.validateAndHydrateConfig(draft);
+      return {
+        config: result.config,
+        health: result.health,
+        healthError: null,
+      };
+    } catch (error) {
+      return {
+        config: {
+          baseUrl: draft.baseUrl.trim(),
+          apiKey: draft.apiKey.trim(),
+          models: [],
+        },
+        health: undefined,
+        healthError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   private async confirm(title: string, question: string): Promise<boolean> {
     this.modalOpen = true;
     const previousFocus = this.focusPane;
@@ -1588,7 +1786,9 @@ class CodexAccountsCliApp {
   ): Promise<void> {
     const workspace = this.getWorkspaceService();
     const previousAuth = await this.store.readCurrentAuth();
-    const previousAccountId = this.accounts.find((entry) => entry.isActive)?.record.id ?? null;
+    const previousAccountId =
+      this.accounts.find((entry) => entry.isActive && entry.record.kind === "auth")?.record.id ??
+      null;
     const launchStartedAt = Date.now();
     let paneRecord: WorkspacePaneRecord | null = null;
 
@@ -1793,10 +1993,6 @@ function formatRemaining(window: UsageWindowSummary | undefined): string {
   return "--";
 }
 
-function formatReset(window: UsageWindowSummary | undefined): string {
-  return window?.resetsAt ? formatTimestamp(window.resetsAt) : "--";
-}
-
 function formatTimestamp(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -1811,7 +2007,17 @@ function formatTimestamp(value: string): string {
   });
 }
 
-function buildUsageStatus(account: ManagedAccount): string {
+function buildAccountStatus(account: ManagedAccount): string {
+  if (account.record.kind === "api") {
+    if (account.record.healthError) {
+      return `API ${truncate(account.record.healthError, 24)}`;
+    }
+    if (account.record.health?.status === "healthy") {
+      return `API OK ${account.record.health.modelCount} models`;
+    }
+    return "API pending";
+  }
+
   if (account.record.usageError) {
     return formatShortFailure(account.record.usageError);
   }
@@ -1821,6 +2027,38 @@ function buildUsageStatus(account: ManagedAccount): string {
   }
 
   return "Usage unavailable";
+}
+
+function buildAccountInfo(account: ManagedAccount): string {
+  if (account.record.kind === "api") {
+    return account.record.apiBaseUrl ?? "--";
+  }
+  return account.record.usage?.planType ?? account.record.usage?.creditLabel ?? "--";
+}
+
+function buildAccountActionOptions(
+  account: ManagedAccount,
+): SelectOption<AccountActionId>[] {
+  if (account.record.kind === "api") {
+    return [
+      { label: "Check API health", value: "checkApiHealth" },
+      { label: "Edit API account", value: "editApiAccount" },
+      { label: "Switch API config", value: "switchAccount" },
+      { label: "Rename account", value: "renameAccount" },
+      { label: "Remove account", value: "removeAccount" },
+      { label: "Back", value: "back" },
+    ];
+  }
+
+  return [
+    { label: "Refresh usage", value: "refreshUsage" },
+    { label: "Refresh token", value: "refreshToken" },
+    { label: "Switch account", value: "switchAccount" },
+    { label: "Start new Codex thread here", value: "startThread" },
+    { label: "Rename account", value: "renameAccount" },
+    { label: "Remove account", value: "removeAccount" },
+    { label: "Back", value: "back" },
+  ];
 }
 
 function formatRefreshSummary(summary: RefreshSummary): string {

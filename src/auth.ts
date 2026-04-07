@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { AccountRecord, CodexAuthFile, TokenClaims } from "./types";
+import type {
+  AccountRecord,
+  ApiConfigFile,
+  CodexAuthFile,
+  TokenClaims,
+} from "./types";
 
 const CHATGPT_AUTH_CLAIM = "https://api.openai.com/auth";
 
@@ -93,6 +98,22 @@ export function computeSnapshotHash(auth: CodexAuthFile): string {
   return sha256(JSON.stringify(auth));
 }
 
+export function computeApiSnapshotHash(api: ApiConfigFile): string {
+  return sha256(JSON.stringify(api));
+}
+
+export function deriveApiAccountIdentity(api: ApiConfigFile): {
+  fingerprint: string;
+  apiBaseUrl: string;
+} {
+  const normalizedBaseUrl = normalizeApiBaseUrl(api.baseUrl);
+  const fingerprintBase = `${normalizedBaseUrl}:${normalizeString(api.apiKey) ?? ""}`;
+  return {
+    fingerprint: sha256(fingerprintBase).slice(0, 16),
+    apiBaseUrl: normalizedBaseUrl,
+  };
+}
+
 export function getAccountLabel(record: AccountRecord): string {
   const customLabel = normalizeString(record.label);
   if (customLabel) {
@@ -105,8 +126,38 @@ export function getAccountLabel(record: AccountRecord): string {
     normalizeString(record.chatgptAccountId) ??
     normalizeString(record.accountId) ??
     normalizeString(record.subject) ??
+    normalizeString(record.apiBaseUrl) ??
     "Unknown account"
   );
+}
+
+export function normalizeApiBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    throw new Error("API base URL is required.");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`Invalid API base URL: ${trimmed}`);
+  }
+
+  const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+  parsed.pathname = normalizedPath.length > 0 ? normalizedPath : "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+export function maskApiKey(apiKey: string): string {
+  const trimmed = apiKey.trim();
+  if (trimmed.length <= 8) {
+    return "*".repeat(Math.max(trimmed.length, 4));
+  }
+
+  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
 }
 
 export function quoteForShell(input: string): string {

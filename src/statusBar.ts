@@ -44,6 +44,14 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
       return;
     }
 
+    if (state.liveApiAccount && state.liveApiAccount.record.kind === "api") {
+      this.item.text = `$(plug) ${summarizeApi(state.liveApiAccount)}`;
+      this.item.tooltip = `${buildApiTooltip(state.liveApiAccount, state)}\nClick to open the full sidebar.`;
+      this.item.show();
+      this.renderRestartState(state);
+      return;
+    }
+
     const currentWindowAccount = state.currentWindowAccount;
     if (!currentWindowAccount.account) {
       this.item.text = "$(pulse) 5h -- | 1w --";
@@ -128,6 +136,9 @@ function getAlignment(): vscode.StatusBarAlignment {
 }
 
 function summarizeUsage(active: ManagedAccount): string {
+  if (active.record.kind !== "auth") {
+    return "5h -- | 1w --";
+  }
   const usage = active.record.usage;
   if (!usage) {
     return "5h -- | 1w --";
@@ -149,12 +160,26 @@ function summarizeUsage(active: ManagedAccount): string {
   return parts.join(" | ");
 }
 
+function summarizeApi(active: ManagedAccount): string {
+  const health = active.record.health;
+  if (health?.status === "healthy") {
+    return `API OK | ${health.modelCount} models`;
+  }
+  if (active.record.healthError) {
+    return "API issue";
+  }
+  return "API pending";
+}
+
 function buildTooltip(
   currentWindowAccount: CurrentWindowAccountState,
   state: ControllerState,
 ): string {
   const active = currentWindowAccount.account;
   if (!active) {
+    return buildUnavailableTooltip(currentWindowAccount, state);
+  }
+  if (active.record.kind !== "auth") {
     return buildUnavailableTooltip(currentWindowAccount, state);
   }
 
@@ -192,6 +217,27 @@ function buildTooltip(
     const failure = toUsageFailureInfo(active.record.usageError);
     lines.push(`Refresh error type: ${failure.typeLabel}`);
     lines.push(`Refresh error detail: ${failure.detail}`);
+  }
+  return lines.join("\n");
+}
+
+function buildApiTooltip(active: ManagedAccount, state: ControllerState): string {
+  const lines: string[] = [
+    `Live API: ${getAccountLabel(active.record)}`,
+    `Base URL: ${active.record.apiBaseUrl ?? "unknown"}`,
+    `Models: ${String(active.record.models?.length ?? 0)}`,
+    "Click for switch/import/export/API actions.",
+  ];
+  if (active.record.health?.checkedAt) {
+    lines.push(`Last check: ${active.record.health.checkedAt}`);
+  }
+  if (active.record.healthError) {
+    lines.push(`Health error: ${active.record.healthError}`);
+  }
+  if (state.restart.thisWindowNeedsReload) {
+    lines.push(
+      `Auth window reload still needed: ${state.restart.currentWindowAccountLabel ?? "current window account"}.`,
+    );
   }
   return lines.join("\n");
 }

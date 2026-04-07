@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 
+import { ApiService } from "./api";
 import { resolveCodexHome } from "./auth";
 import { CodexAccountsController } from "./controller";
 import { CodexAccountsSidebarProvider } from "./sidebar";
@@ -17,6 +18,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const controller = new CodexAccountsController(
     new CodexAccountStore(codexHome),
     new UsageService(),
+    new ApiService(),
   );
   context.subscriptions.push(controller);
 
@@ -57,6 +59,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     ),
     vscode.commands.registerCommand(
+      "codexAccounts.switchApiAccount",
+      async (item) => {
+        await controller.switchApiAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand(
       "codexAccounts.removeAccount",
       async (item) => {
         await controller.removeAccount(item);
@@ -66,6 +74,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       "codexAccounts.renameAccount",
       async (item) => {
         await controller.renameAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand("codexAccounts.addApiAccount", async () => {
+      await controller.addApiAccount();
+    }),
+    vscode.commands.registerCommand(
+      "codexAccounts.editApiAccount",
+      async (item) => {
+        await controller.editApiAccount(item);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.checkApiHealth",
+      async (item) => {
+        await controller.checkApiHealth(item);
+      },
+    ),
+    vscode.commands.registerCommand(
+      "codexAccounts.openLiveApiConfig",
+      async () => {
+        await controller.openLiveApiConfig();
       },
     ),
     vscode.commands.registerCommand(

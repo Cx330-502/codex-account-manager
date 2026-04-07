@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [3.0.1] - 2026-04-07
+
+- Prepared aligned `3.0.1` VSIX and npm package metadata for the mixed `auth` + `api` account release.
+- Clarified release behavior around Codex thread browsing: the current CLI thread picker lists non-archived local threads only; archived threads remain on disk but are not shown in that picker yet.
+- Kept extension and CLI package versions in sync for Marketplace-style VSIX output and npm CLI publishing.
+
+## [3.0.0] - 2026-04-07
+
+- Added dual account-kind support (`auth` + `api`) across extension and CLI data model, storage, import/export, and account list rendering.
+- Added managed API config snapshots with `baseUrl`, `apiKey`, model discovery, and persisted health status; live API switch now writes `~/.codex/account-manager/api-live.json`.
+- Added API health checking flow (connectivity/auth/models via `/v1/models`) with visible success/error state in sidebar, status bar, and CLI.
+- Added explicit quick action to switch to API accounts from the extension (`Switch API`) and improved API switch UX with a direct `Reload Window` action prompt.
+- Kept existing `auth.json` switch/login/relogin/usage flows backward-compatible while introducing mixed-kind registry and legacy bundle compatibility.
+
 ## [0.2.11] - 2026-04-01
 
 - Added CLI workspace management primitives for Codex threads, including tmux session/pane orchestration and local registry tracking.

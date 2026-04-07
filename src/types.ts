@@ -14,6 +14,26 @@ export interface CodexAuthFile {
   [key: string]: unknown;
 }
 
+export interface ApiModelSummary {
+  id: string;
+  ownedBy?: string | null;
+  createdAt?: string | null;
+}
+
+export interface ApiConfigFile {
+  baseUrl: string;
+  apiKey: string;
+  models: ApiModelSummary[];
+}
+
+export interface ApiHealthSnapshot {
+  status: "healthy" | "error";
+  checkedAt: string;
+  latencyMs: number | null;
+  modelCount: number;
+  baseUrl: string;
+}
+
 export interface TokenClaims {
   sub?: string;
   email?: string;
@@ -24,6 +44,7 @@ export interface TokenClaims {
 }
 
 export type AccountSource = "auto" | "manual" | "import";
+export type AccountKind = "auth" | "api";
 
 export interface AccountIdentity {
   fingerprint: string;
@@ -58,6 +79,7 @@ export interface UsageSnapshot {
 
 export interface AccountRecord {
   id: string;
+  kind: AccountKind;
   label?: string;
   email?: string;
   name?: string;
@@ -65,6 +87,12 @@ export interface AccountRecord {
   accountId?: string;
   chatgptAccountId?: string;
   authMode?: string;
+  apiBaseUrl?: string;
+  apiKeyMasked?: string;
+  models?: ApiModelSummary[];
+  health?: ApiHealthSnapshot;
+  lastHealthCheckedAt?: string | null;
+  healthError?: string | null;
   createdAt: string;
   updatedAt: string;
   lastCapturedAt: string;
@@ -77,7 +105,7 @@ export interface AccountRecord {
 }
 
 export interface AccountRegistry {
-  version: 1;
+  version: 2;
   accounts: AccountRecord[];
 }
 
@@ -111,25 +139,56 @@ export interface RuntimeState {
 
 export interface ManagedAccount {
   record: AccountRecord;
-  auth: CodexAuthFile;
+  payload: ManagedAccountPayload;
   isActive: boolean;
   snapshotPath: string;
 }
 
 export interface ExportBundleEntry {
   record: AccountRecord;
-  auth: CodexAuthFile;
+  payload: ExportPayload;
 }
 
 export interface ExportBundle {
-  version: 1;
+  version: 2;
   exportedAt: string;
   accounts: ExportBundleEntry[];
+}
+
+export interface AuthSnapshotFile {
+  kind: "auth";
+  auth: CodexAuthFile;
+}
+
+export interface ApiSnapshotFile {
+  kind: "api";
+  api: ApiConfigFile;
+}
+
+export type ManagedAccountPayload =
+  | {
+      kind: "auth";
+      auth: CodexAuthFile;
+    }
+  | {
+      kind: "api";
+      api: ApiConfigFile;
+    };
+
+export type ExportPayload = AuthSnapshotFile | ApiSnapshotFile;
+
+export interface ApiLiveConfigFile {
+  version: 1;
+  currentAccountId: string;
+  label?: string;
+  updatedAt: string;
+  config: ApiConfigFile;
 }
 
 export interface SharedStateInfo {
   codexHome: string;
   authPath: string;
+  apiConfigPath: string;
   registryPath: string;
   runtimeStatePath: string;
   sessionsPath: string;

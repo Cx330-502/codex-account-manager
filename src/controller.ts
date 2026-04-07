@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import * as vscode from "vscode";
 
+import { ApiService } from "./api";
 import {
   deriveAccountIdentity,
   getAccountLabel,
@@ -12,6 +13,7 @@ import {
 import { CodexAccountStore } from "./store";
 import type {
   AccountRecord,
+  ApiConfigFile,
   CodexAuthFile,
   ManagedAccount,
   RuntimeState,
@@ -28,6 +30,7 @@ import { UsageService, type UsageFetchResult } from "./usage";
 export interface ControllerState {
   accounts: ManagedAccount[];
   currentWindowAccount: CurrentWindowAccountState;
+  liveApiAccount: ManagedAccount | null;
   sharedState: SharedStateInfo;
   restart: RestartState;
   lastError: string | null;
@@ -85,12 +88,14 @@ export class CodexAccountsController implements vscode.Disposable {
   public constructor(
     private readonly store: CodexAccountStore,
     private readonly usageService: UsageService,
+    private readonly apiService: ApiService,
     windowId: string = randomUUID(),
   ) {
     this.windowId = windowId;
     this.state = {
       accounts: [],
       currentWindowAccount: emptyCurrentWindowAccountState(),
+      liveApiAccount: null,
       sharedState: this.store.getSharedStateInfo(),
       restart: emptyRestartState(),
       lastError: null,
@@ -143,6 +148,7 @@ export class CodexAccountsController implements vscode.Disposable {
     try {
       const accounts = await this.store.listAccounts();
       const currentAuth = await this.store.readCurrentAuth();
+      const liveApiAccount = await this.buildLiveApiAccountState(accounts);
       const runtime = await this.store.getRuntimeState();
       const liveAuthState = describeLiveAuth(accounts, currentAuth);
       const restart = this.buildRestartState(accounts, runtime, liveAuthState);
@@ -153,6 +159,7 @@ export class CodexAccountsController implements vscode.Disposable {
           restart,
           liveAuthState,
         ),
+        liveApiAccount,
         sharedState: this.store.getSharedStateInfo(),
         restart,
         lastError: null,
@@ -177,6 +184,7 @@ export class CodexAccountsController implements vscode.Disposable {
       this.updateState({
         accounts: this.state.accounts,
         currentWindowAccount: this.state.currentWindowAccount,
+        liveApiAccount: this.state.liveApiAccount,
         sharedState: this.store.getSharedStateInfo(),
         restart: this.state.restart,
         lastError: toErrorMessage(error),
@@ -202,19 +210,47 @@ export class CodexAccountsController implements vscode.Disposable {
       return;
     }
 
+    await this.switchToManagedAccount(account);
+  }
+
+  public async switchApiAccount(target?: AccountTarget): Promise<void> {
+    const account = await this.resolveApiAccount(target, "Select an API account to switch to");
+    if (!account) {
+      return;
+    }
+
+    await this.switchToManagedAccount(account);
+  }
+
+  private async switchToManagedAccount(account: ManagedAccount): Promise<void> {
     const accounts = await this.store.listAccounts();
     const previousActiveAccount =
-      accounts.find((entry) => entry.isActive)?.record.id ?? null;
+      accounts.find((entry) => entry.isActive && entry.record.kind === "auth")?.record.id ?? null;
     await this.store.switchToAccount(account.record.id);
-    await this.store.recordSwitch(previousActiveAccount, account.record.id);
+    if (account.record.kind === "auth") {
+      await this.store.recordSwitch(previousActiveAccount, account.record.id);
+    }
     await this.refresh(false);
-    void this.refreshUsage(account.record.id, {
-      reason: "background",
-    });
+    if (account.record.kind === "auth") {
+      void this.refreshUsage(account.record.id, {
+        reason: "background",
+      });
+    }
 
-    vscode.window.showInformationMessage(
-      `Switched Codex auth.json to ${getAccountLabel(account.record)}. Existing windows should reload before new Codex runs use the new account.`,
+    if (account.record.kind === "auth") {
+      vscode.window.showInformationMessage(
+        `Switched Codex auth.json to ${getAccountLabel(account.record)}. Existing windows should reload before new Codex runs use the new account.`,
+      );
+      return;
+    }
+
+    const action = await vscode.window.showInformationMessage(
+      `Switched live API config to ${getAccountLabel(account.record)} at ${this.store.apiConfigPath}. Reload this window to ensure new runs pick it up.`,
+      "Reload Window",
     );
+    if (action === "Reload Window") {
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
+    }
   }
 
   public async removeAccount(target?: AccountTarget): Promise<void> {
@@ -253,6 +289,90 @@ export class CodexAccountsController implements vscode.Disposable {
 
     await this.store.renameAccount(account.record.id, nextLabel);
     await this.refresh(false);
+  }
+
+  public async addApiAccount(): Promise<void> {
+    const draft = await this.promptForApiConfig();
+    if (!draft) {
+      return;
+    }
+
+    const result = await this.validateApiDraft(draft);
+    const record = await this.store.createApiAccount(result.config, "manual");
+    await this.store.setApiHealth(record.id, result.config, result.health, result.healthError);
+    await this.refresh(false);
+    vscode.window.showInformationMessage(
+      result.healthError
+        ? `Saved API account ${getAccountLabel(record)} with health check warning: ${result.healthError}`
+        : `Saved API account ${getAccountLabel(record)} and fetched ${result.config.models.length} model(s).`,
+    );
+  }
+
+  public async editApiAccount(target?: AccountTarget): Promise<void> {
+    const account = await this.resolveApiAccount(target, "Select an API account to edit");
+    if (!account) {
+      return;
+    }
+
+    const currentConfig = account.payload.kind === "api" ? account.payload.api : null;
+    if (!currentConfig) {
+      throw new Error("Selected account does not contain an API config.");
+    }
+
+    const draft = await this.promptForApiConfig(currentConfig);
+    if (!draft) {
+      return;
+    }
+
+    const result = await this.validateApiDraft(draft);
+    await this.store.setApiHealth(
+      account.record.id,
+      result.config,
+      result.health,
+      result.healthError,
+    );
+    await this.refresh(false);
+    vscode.window.showInformationMessage(
+      result.healthError
+        ? `Updated API account ${getAccountLabel(account.record)} with health check warning: ${result.healthError}`
+        : `Updated API account ${getAccountLabel(account.record)} and refreshed ${result.config.models.length} model(s).`,
+    );
+  }
+
+  public async checkApiHealth(target?: AccountTarget): Promise<void> {
+    const account = await this.resolveApiAccount(target, "Select an API account to check");
+    if (!account) {
+      return;
+    }
+    if (account.payload.kind !== "api") {
+      return;
+    }
+
+    const result = await this.validateApiDraft(account.payload.api);
+    await this.store.setApiHealth(
+      account.record.id,
+      result.config,
+      result.health,
+      result.healthError,
+    );
+    await this.refresh(false);
+    vscode.window.showInformationMessage(
+      result.healthError
+        ? `API health check failed for ${getAccountLabel(account.record)}: ${result.healthError}`
+        : `API health check passed for ${getAccountLabel(account.record)} with ${result.config.models.length} model(s).`,
+    );
+  }
+
+  public async openLiveApiConfig(): Promise<void> {
+    const apiConfigUri = vscode.Uri.file(this.store.apiConfigPath);
+    try {
+      await vscode.commands.executeCommand("revealFileInOS", apiConfigUri);
+    } catch {
+      const document = await vscode.workspace.openTextDocument(apiConfigUri);
+      await vscode.window.showTextDocument(document, {
+        preview: false,
+      });
+    }
   }
 
   public async importBundle(): Promise<void> {
@@ -316,10 +436,14 @@ export class CodexAccountsController implements vscode.Disposable {
     if (!account) {
       return;
     }
+    if (account.record.kind !== "auth") {
+      vscode.window.showInformationMessage("Re-login replace is only available for auth accounts.");
+      return;
+    }
 
     const accounts = await this.store.listAccounts();
     const previousActiveAccount =
-      accounts.find((entry) => entry.isActive)?.record.id ?? null;
+      accounts.find((entry) => entry.isActive && entry.record.kind === "auth")?.record.id ?? null;
     if (!account.isActive) {
       await this.store.switchToAccount(account.record.id);
       await this.store.recordSwitch(previousActiveAccount, account.record.id);
@@ -363,9 +487,17 @@ export class CodexAccountsController implements vscode.Disposable {
     try {
       const accounts = await this.store.listAccounts();
       const targetId = getAccountTargetId(target);
-      const targetAccounts = targetId
+      const targetAccounts = (targetId
         ? accounts.filter((account) => account.record.id === targetId)
-        : accounts;
+        : accounts).filter((account) => account.record.kind === "auth");
+    if (targetAccounts.length === 0) {
+      if (!isBackgroundRefresh) {
+        vscode.window.showInformationMessage(
+          "Usage refresh is only available for auth-based accounts.",
+        );
+      }
+      return;
+    }
     const minIntervalMinutes = isBackgroundRefresh
       ? getUsageRefreshMinIntervalMinutes()
       : 0;
@@ -389,8 +521,11 @@ export class CodexAccountsController implements vscode.Disposable {
       }
 
       try {
+        if (account.payload.kind !== "auth") {
+          continue;
+        }
         const result = await this.fetchUsageWithRetry(
-          account.auth,
+          account.payload.auth,
           isBackgroundRefresh,
         );
         this.backgroundFailureCounts.delete(account.record.id);
@@ -651,7 +786,9 @@ export class CodexAccountsController implements vscode.Disposable {
     }
 
     try {
-      const accounts = await this.store.listAccounts();
+      const accounts = (await this.store.listAccounts()).filter(
+        (account) => account.record.kind === "auth",
+      );
       if (accounts.length === 0) {
         return;
       }
@@ -715,10 +852,16 @@ export class CodexAccountsController implements vscode.Disposable {
 
     const pickedItem = await vscode.window.showQuickPick(
       accounts.map((account) => ({
-        label: getAccountLabel(account.record),
+        label: `[${account.record.kind.toUpperCase()}] ${getAccountLabel(account.record)}`,
         description:
-          account.record.email ?? account.record.chatgptAccountId ?? "",
-        detail: account.isActive ? "current account" : "",
+          account.record.kind === "auth"
+            ? account.record.email ?? account.record.chatgptAccountId ?? ""
+            : account.record.apiBaseUrl ?? "",
+        detail: account.isActive
+          ? account.record.kind === "auth"
+            ? "current live auth"
+            : "current live API"
+          : "",
         account,
       })),
       {
@@ -727,6 +870,90 @@ export class CodexAccountsController implements vscode.Disposable {
     );
 
     return pickedItem?.account ?? null;
+  }
+
+  private async resolveApiAccount(
+    target: AccountTarget,
+    placeHolder: string,
+  ): Promise<ManagedAccount | null> {
+    const account = await this.resolveAccount(target, placeHolder);
+    if (!account) {
+      return null;
+    }
+    if (account.record.kind !== "api") {
+      vscode.window.showInformationMessage("This action only applies to API accounts.");
+      return null;
+    }
+    return account;
+  }
+
+  private async promptForApiConfig(
+    initial?: Partial<ApiConfigFile>,
+  ): Promise<Pick<ApiConfigFile, "baseUrl" | "apiKey"> | null> {
+    const baseUrl = await vscode.window.showInputBox({
+      prompt: "API base URL",
+      placeHolder: "https://api.openai.com",
+      value: initial?.baseUrl ?? "",
+      ignoreFocusOut: true,
+    });
+    if (baseUrl === undefined) {
+      return null;
+    }
+
+    const apiKey = await vscode.window.showInputBox({
+      prompt: "API key",
+      password: true,
+      value: initial?.apiKey ?? "",
+      ignoreFocusOut: true,
+    });
+    if (apiKey === undefined) {
+      return null;
+    }
+
+    return {
+      baseUrl,
+      apiKey,
+    };
+  }
+
+  private async validateApiDraft(
+    draft: Pick<ApiConfigFile, "baseUrl" | "apiKey">,
+  ): Promise<{
+    config: ApiConfigFile;
+    health: AccountRecord["health"] | undefined;
+    healthError: string | null;
+  }> {
+    try {
+      const result = await this.apiService.validateAndHydrateConfig(draft);
+      return {
+        config: result.config,
+        health: result.health,
+        healthError: null,
+      };
+    } catch (error) {
+      return {
+        config: {
+          baseUrl: draft.baseUrl.trim(),
+          apiKey: draft.apiKey.trim(),
+          models: [],
+        },
+        health: undefined,
+        healthError: toErrorMessage(error),
+      };
+    }
+  }
+
+  private async buildLiveApiAccountState(
+    accounts: ManagedAccount[],
+  ): Promise<ManagedAccount | null> {
+    const liveApi = await this.store.readLiveApiConfig();
+    if (!liveApi?.currentAccountId) {
+      return null;
+    }
+
+    return (
+      accounts.find((account) => account.record.id === liveApi.currentAccountId) ?? null
+    );
   }
 
   private resolveCodexBinary(): string {

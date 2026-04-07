@@ -2,7 +2,7 @@
   "name": "codex-account-manager",
   "displayName": "Codex Account Manager",
   "description": "Manage multiple Codex accounts by snapshotting and switching ~/.codex/auth.json.",
-  "version": "0.2.11",
+  "version": "3.0.1",
   "publisher": "Cx330-502",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -29,8 +29,13 @@
     "onCommand:codexAccounts.refresh",
     "onCommand:codexAccounts.saveCurrentAccount",
     "onCommand:codexAccounts.switchAccount",
+    "onCommand:codexAccounts.switchApiAccount",
     "onCommand:codexAccounts.removeAccount",
     "onCommand:codexAccounts.renameAccount",
+    "onCommand:codexAccounts.addApiAccount",
+    "onCommand:codexAccounts.editApiAccount",
+    "onCommand:codexAccounts.checkApiHealth",
+    "onCommand:codexAccounts.openLiveApiConfig",
     "onCommand:codexAccounts.importBundle",
     "onCommand:codexAccounts.exportBundle",
     "onCommand:codexAccounts.startLogin",
@@ -62,6 +67,12 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "codexAccounts.switchApiAccount",
+        "title": "Codex Accounts: Switch API Account",
+        "shortTitle": "Switch API",
+        "icon": "$(plug)"
+      },
+      {
         "command": "codexAccounts.removeAccount",
         "title": "Codex Accounts: Remove Account",
         "shortTitle": "Remove",
@@ -72,6 +83,30 @@
         "title": "Codex Accounts: Rename Account",
         "shortTitle": "Rename",
         "icon": "$(edit)"
+      },
+      {
+        "command": "codexAccounts.addApiAccount",
+        "title": "Codex Accounts: Add API Account",
+        "shortTitle": "Add API",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "codexAccounts.editApiAccount",
+        "title": "Codex Accounts: Edit API Account",
+        "shortTitle": "Edit API",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "codexAccounts.checkApiHealth",
+        "title": "Codex Accounts: Check API Health",
+        "shortTitle": "Check API",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "codexAccounts.openLiveApiConfig",
+        "title": "Codex Accounts: Open Live API Config",
+        "shortTitle": "Open API Config",
+        "icon": "$(file-code)"
       },
       {
         "command": "codexAccounts.importBundle",
@@ -153,6 +188,16 @@
           "group": "navigation@2"
         },
         {
+          "command": "codexAccounts.switchApiAccount",
+          "when": "view == codexAccountsView",
+          "group": "navigation@2.2"
+        },
+        {
+          "command": "codexAccounts.addApiAccount",
+          "when": "view == codexAccountsView",
+          "group": "navigation@2.5"
+        },
+        {
           "command": "codexAccounts.refreshUsage",
           "when": "view == codexAccountsView",
           "group": "navigation@3"
@@ -188,6 +233,11 @@
           "command": "codexAccounts.refreshUsage",
           "when": "view == codexAccountsView && viewItem == codexAccount",
           "group": "navigation@1"
+        },
+        {
+          "command": "codexAccounts.checkApiHealth",
+          "when": "view == codexAccountsView && viewItem == codexAccount",
+          "group": "navigation@1.5"
         },
         {
           "command": "codexAccounts.removeAccount",

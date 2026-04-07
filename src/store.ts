@@ -2,16 +2,25 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import {
+  computeApiSnapshotHash,
   computeSnapshotHash,
   deriveAccountIdentity,
+  deriveApiAccountIdentity,
+  getAccountLabel,
+  maskApiKey,
 } from "./auth";
 import type {
   AccountRecord,
   AccountRegistry,
   AccountSource,
+  ApiConfigFile,
+  ApiLiveConfigFile,
+  ApiSnapshotFile,
   CodexAuthFile,
   ExportBundle,
+  ExportBundleEntry,
   ManagedAccount,
+  ManagedAccountPayload,
   RuntimeState,
   SharedStateInfo,
   SwitchMarker,
@@ -19,8 +28,9 @@ import type {
   WindowSessionRecord,
 } from "./types";
 
-const REGISTRY_VERSION = 1 as const;
+const REGISTRY_VERSION = 2 as const;
 const RUNTIME_STATE_VERSION = 1 as const;
+const API_LIVE_VERSION = 1 as const;
 const WINDOW_SESSION_STALE_MS = 2 * 60_000;
 const RUNTIME_LOCK_STALE_MS = 30_000;
 const RUNTIME_LOCK_WAIT_MS = 3_000;
@@ -31,6 +41,7 @@ export class CodexAccountStore {
   public readonly accountsRoot: string;
   public readonly registryPath: string;
   public readonly runtimeStatePath: string;
+  public readonly apiConfigPath: string;
   public readonly sessionsPath: string;
   public readonly memoriesPath: string;
   public readonly sqlitePath: string;
@@ -41,6 +52,7 @@ export class CodexAccountStore {
     this.accountsRoot = path.join(this.managerRoot, "accounts");
     this.registryPath = path.join(this.managerRoot, "registry.json");
     this.runtimeStatePath = path.join(this.managerRoot, "runtime.json");
+    this.apiConfigPath = path.join(this.managerRoot, "api-live.json");
     this.sessionsPath = path.join(this.codexHome, "sessions");
     this.memoriesPath = path.join(this.codexHome, "memories");
     this.sqlitePath = path.join(this.codexHome, "state_5.sqlite");
@@ -62,6 +74,38 @@ export class CodexAccountStore {
     }
 
     await this.writeJsonFile(this.authPath, auth);
+  }
+
+  public async readLiveApiConfig(): Promise<ApiLiveConfigFile | null> {
+    const payload = await this.readJsonFile<ApiLiveConfigFile>(this.apiConfigPath);
+    if (
+      !payload ||
+      payload.version !== API_LIVE_VERSION ||
+      typeof payload.currentAccountId !== "string" ||
+      !payload.config
+    ) {
+      return null;
+    }
+    return {
+      ...payload,
+      config: cloneApiConfig(payload.config),
+    };
+  }
+
+  public async writeLiveApiConfig(
+    payload: ApiLiveConfigFile | null,
+  ): Promise<void> {
+    await this.ensureReady();
+    if (!payload) {
+      await fs.rm(this.apiConfigPath, { force: true });
+      return;
+    }
+
+    await this.writeJsonFile(this.apiConfigPath, {
+      ...payload,
+      version: API_LIVE_VERSION,
+      config: cloneApiConfig(payload.config),
+    });
   }
 
   public async captureCurrentAuth(source: AccountSource): Promise<AccountRecord | null> {
@@ -88,6 +132,7 @@ export class CodexAccountStore {
     const snapshotHash = computeSnapshotHash(auth);
     const nextRecord: AccountRecord = {
       id: identity.fingerprint,
+      kind: "auth",
       label: existingRecord?.label ?? importedRecord?.label,
       email: identity.email ?? importedRecord?.email ?? existingRecord?.email,
       name: identity.name ?? importedRecord?.name ?? existingRecord?.name,
@@ -101,6 +146,12 @@ export class CodexAccountStore {
         existingRecord?.chatgptAccountId,
       authMode:
         identity.authMode ?? importedRecord?.authMode ?? existingRecord?.authMode,
+      apiBaseUrl: undefined,
+      apiKeyMasked: undefined,
+      models: undefined,
+      health: undefined,
+      lastHealthCheckedAt: null,
+      healthError: null,
       createdAt: existingRecord?.createdAt ?? importedRecord?.createdAt ?? now,
       updatedAt: now,
       lastCapturedAt:
@@ -123,7 +174,10 @@ export class CodexAccountStore {
       usageError: importedRecord?.usageError ?? existingRecord?.usageError ?? null,
     };
 
-    await this.writeJsonFile(this.getSnapshotPath(nextRecord.id), auth);
+    await this.writeSnapshotPayload(nextRecord.id, {
+      kind: "auth",
+      auth: cloneAuthFile(auth),
+    });
 
     const nextAccounts = registry.accounts.filter(
       (record) => record.id !== nextRecord.id,
@@ -137,26 +191,171 @@ export class CodexAccountStore {
     return nextRecord;
   }
 
+  public async createApiAccount(
+    api: ApiConfigFile,
+    source: AccountSource,
+    importedRecord?: Partial<AccountRecord>,
+  ): Promise<AccountRecord> {
+    await this.ensureReady();
+
+    const identity = deriveApiAccountIdentity(api);
+    const registry = await this.readRegistry();
+    const existingRecord =
+      registry.accounts.find((record) => record.id === identity.fingerprint) ?? null;
+    const now = new Date().toISOString();
+    const nextRecord: AccountRecord = {
+      id: identity.fingerprint,
+      kind: "api",
+      label: existingRecord?.label ?? importedRecord?.label,
+      email: undefined,
+      name: undefined,
+      subject: undefined,
+      accountId: undefined,
+      chatgptAccountId: undefined,
+      authMode: undefined,
+      apiBaseUrl: identity.apiBaseUrl,
+      apiKeyMasked: maskApiKey(api.apiKey),
+      models: cloneModels(api.models),
+      health: importedRecord?.health ?? existingRecord?.health,
+      lastHealthCheckedAt:
+        importedRecord?.lastHealthCheckedAt ??
+        existingRecord?.lastHealthCheckedAt ??
+        importedRecord?.health?.checkedAt ??
+        existingRecord?.health?.checkedAt ??
+        null,
+      healthError: importedRecord?.healthError ?? existingRecord?.healthError ?? null,
+      createdAt: existingRecord?.createdAt ?? importedRecord?.createdAt ?? now,
+      updatedAt: now,
+      lastCapturedAt:
+        source === "import"
+          ? importedRecord?.lastCapturedAt ?? existingRecord?.lastCapturedAt ?? now
+          : now,
+      lastUsedAt:
+        existingRecord?.lastUsedAt ??
+        importedRecord?.lastUsedAt ??
+        (source === "manual" ? now : undefined),
+      source: existingRecord?.source ?? importedRecord?.source ?? source,
+      snapshotHash: computeApiSnapshotHash(api),
+      usage: undefined,
+      usageCheckedAt: null,
+      usageError: null,
+    };
+
+    await this.writeSnapshotPayload(nextRecord.id, {
+      kind: "api",
+      api: cloneApiConfig(api),
+    });
+
+    const nextAccounts = registry.accounts.filter(
+      (record) => record.id !== nextRecord.id,
+    );
+    nextAccounts.push(nextRecord);
+    await this.writeRegistry({
+      version: REGISTRY_VERSION,
+      accounts: nextAccounts,
+    });
+
+    return nextRecord;
+  }
+
+  public async updateApiAccount(id: string, api: ApiConfigFile): Promise<void> {
+    await this.ensureReady();
+
+    const registry = await this.readRegistry();
+    const target = registry.accounts.find((record) => record.id === id);
+    if (!target || target.kind !== "api") {
+      throw new Error(`Managed API account not found: ${id}`);
+    }
+
+    await this.writeSnapshotPayload(id, {
+      kind: "api",
+      api: cloneApiConfig(api),
+    });
+
+    const now = new Date().toISOString();
+    const nextAccounts = registry.accounts.map((record) => {
+      if (record.id !== id) {
+        return record;
+      }
+
+      return {
+        ...record,
+        updatedAt: now,
+        apiBaseUrl: deriveApiAccountIdentity(api).apiBaseUrl,
+        apiKeyMasked: maskApiKey(api.apiKey),
+        models: cloneModels(api.models),
+        snapshotHash: computeApiSnapshotHash(api),
+      };
+    });
+    await this.writeRegistry({
+      version: REGISTRY_VERSION,
+      accounts: nextAccounts,
+    });
+
+    const liveApi = await this.readLiveApiConfig();
+    if (liveApi?.currentAccountId === id) {
+      await this.writeLiveApiConfig({
+        version: API_LIVE_VERSION,
+        currentAccountId: id,
+        label: getAccountLabel(target),
+        updatedAt: now,
+        config: cloneApiConfig(api),
+      });
+    }
+  }
+
+  public async setApiHealth(
+    id: string,
+    api: ApiConfigFile,
+    health: AccountRecord["health"],
+    healthError: string | null,
+  ): Promise<void> {
+    await this.updateApiAccount(id, api);
+    const registry = await this.readRegistry();
+    const checkedAt = health?.checkedAt ?? new Date().toISOString();
+    const nextAccounts = registry.accounts.map((record) => {
+      if (record.id !== id) {
+        return record;
+      }
+
+      return {
+        ...record,
+        updatedAt: checkedAt,
+        models: cloneModels(api.models),
+        health: health ?? undefined,
+        lastHealthCheckedAt: checkedAt,
+        healthError,
+      };
+    });
+    await this.writeRegistry({
+      version: REGISTRY_VERSION,
+      accounts: nextAccounts,
+    });
+  }
+
   public async listAccounts(): Promise<ManagedAccount[]> {
     await this.ensureReady();
 
     const registry = await this.readRegistry();
     const currentAuth = await this.readCurrentAuth();
-    const currentFingerprint = currentAuth
+    const currentAuthFingerprint = currentAuth
       ? deriveAccountIdentity(currentAuth).fingerprint
       : null;
+    const liveApi = await this.readLiveApiConfig();
     const managedAccounts: ManagedAccount[] = [];
 
     for (const record of registry.accounts) {
-      const auth = await this.readJsonFile<CodexAuthFile>(this.getSnapshotPath(record.id));
-      if (!auth) {
+      const payload = await this.readManagedPayload(record.id, record.kind);
+      if (!payload) {
         continue;
       }
 
       managedAccounts.push({
         record,
-        auth,
-        isActive: record.id === currentFingerprint,
+        payload,
+        isActive:
+          (record.kind === "auth" && record.id === currentAuthFingerprint) ||
+          (record.kind === "api" && record.id === liveApi?.currentAccountId),
         snapshotPath: this.getSnapshotPath(record.id),
       });
     }
@@ -175,26 +374,51 @@ export class CodexAccountStore {
   }
 
   public async readAccountAuth(id: string): Promise<CodexAuthFile> {
-    const auth = await this.readJsonFile<CodexAuthFile>(this.getSnapshotPath(id));
-    if (!auth) {
-      throw new Error(`Account snapshot not found: ${id}`);
+    const payload = await this.readManagedPayload(id, "auth");
+    if (!payload || payload.kind !== "auth") {
+      throw new Error(`Auth snapshot not found: ${id}`);
     }
 
-    return auth;
+    return cloneAuthFile(payload.auth);
+  }
+
+  public async readAccountApi(id: string): Promise<ApiConfigFile> {
+    const payload = await this.readManagedPayload(id, "api");
+    if (!payload || payload.kind !== "api") {
+      throw new Error(`API snapshot not found: ${id}`);
+    }
+
+    return cloneApiConfig(payload.api);
   }
 
   public async switchToAccount(id: string): Promise<AccountRecord> {
     await this.ensureReady();
 
-    const currentAuth = await this.readCurrentAuth();
-    if (currentAuth) {
-      await this.saveSnapshotFromAuth(currentAuth, "auto");
+    const registry = await this.readRegistry();
+    const target = registry.accounts.find((record) => record.id === id);
+    if (!target) {
+      throw new Error(`Managed account not found: ${id}`);
     }
 
-    const auth = await this.readAccountAuth(id);
-    await this.writeJsonFile(this.authPath, auth);
+    if (target.kind === "auth") {
+      const currentAuth = await this.readCurrentAuth();
+      if (currentAuth) {
+        await this.saveSnapshotFromAuth(currentAuth, "auto");
+      }
 
-    const registry = await this.readRegistry();
+      const auth = await this.readAccountAuth(id);
+      await this.writeJsonFile(this.authPath, auth);
+    } else {
+      const api = await this.readAccountApi(id);
+      await this.writeLiveApiConfig({
+        version: API_LIVE_VERSION,
+        currentAccountId: id,
+        label: getAccountLabel(target),
+        updatedAt: new Date().toISOString(),
+        config: api,
+      });
+    }
+
     const now = new Date().toISOString();
     const nextAccounts = registry.accounts.map((record) => {
       if (record.id !== id) {
@@ -246,6 +470,15 @@ export class CodexAccountStore {
       throw new Error(`Managed account not found: ${id}`);
     }
 
+    const liveApi = await this.readLiveApiConfig();
+    if (liveApi?.currentAccountId === id) {
+      await this.writeLiveApiConfig({
+        ...liveApi,
+        label: getAccountLabel(updatedRecord),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     return updatedRecord;
   }
 
@@ -258,6 +491,11 @@ export class CodexAccountStore {
       version: REGISTRY_VERSION,
       accounts: nextAccounts,
     });
+
+    const liveApi = await this.readLiveApiConfig();
+    if (liveApi?.currentAccountId === id) {
+      await this.writeLiveApiConfig(null);
+    }
   }
 
   public async setUsage(
@@ -269,6 +507,9 @@ export class CodexAccountStore {
     const checkedAt = new Date().toISOString();
     const nextAccounts = registry.accounts.map((record) => {
       if (record.id !== id) {
+        return record;
+      }
+      if (record.kind !== "auth") {
         return record;
       }
 
@@ -291,7 +532,10 @@ export class CodexAccountStore {
     await this.ensureReady();
 
     const identity = deriveAccountIdentity(auth);
-    await this.writeJsonFile(this.getSnapshotPath(id), auth);
+    await this.writeSnapshotPayload(id, {
+      kind: "auth",
+      auth: cloneAuthFile(auth),
+    });
 
     const currentAuth = await this.readCurrentAuth();
     const currentFingerprint = currentAuth
@@ -304,7 +548,7 @@ export class CodexAccountStore {
     const registry = await this.readRegistry();
     const now = new Date().toISOString();
     const nextAccounts = registry.accounts.map((record) => {
-      if (record.id !== id) {
+      if (record.id !== id || record.kind !== "auth") {
         return record;
       }
 
@@ -317,6 +561,7 @@ export class CodexAccountStore {
         accountId: identity.accountId ?? record.accountId,
         chatgptAccountId: identity.chatgptAccountId ?? record.chatgptAccountId,
         authMode: identity.authMode ?? record.authMode,
+        snapshotHash: computeSnapshotHash(auth),
       };
     });
 
@@ -334,8 +579,8 @@ export class CodexAccountStore {
 
     const registry = await this.readRegistry();
     const targetRecord = registry.accounts.find((record) => record.id === targetId);
-    if (!targetRecord) {
-      throw new Error(`Managed account not found: ${targetId}`);
+    if (!targetRecord || targetRecord.kind !== "auth") {
+      throw new Error(`Managed auth account not found: ${targetId}`);
     }
 
     const identity = deriveAccountIdentity(auth);
@@ -347,6 +592,7 @@ export class CodexAccountStore {
     const nextRecord: AccountRecord = {
       ...targetRecord,
       id: nextId,
+      kind: "auth",
       updatedAt: mergedAt,
       lastCapturedAt: mergedAt,
       snapshotHash: computeSnapshotHash(auth),
@@ -361,7 +607,10 @@ export class CodexAccountStore {
       usageError: null,
     };
 
-    await this.writeJsonFile(this.getSnapshotPath(nextId), auth);
+    await this.writeSnapshotPayload(nextId, {
+      kind: "auth",
+      auth: cloneAuthFile(auth),
+    });
     if (targetId !== nextId) {
       await fs.rm(this.getSnapshotPath(targetId), { force: true });
     }
@@ -383,17 +632,17 @@ export class CodexAccountStore {
 
   public async exportBundle(targetPath: string): Promise<number> {
     const registry = await this.readRegistry();
-    const accounts = [];
+    const accounts: ExportBundleEntry[] = [];
 
     for (const record of registry.accounts) {
-      const auth = await this.readJsonFile<CodexAuthFile>(this.getSnapshotPath(record.id));
-      if (!auth) {
+      const payload = await this.readManagedPayload(record.id, record.kind);
+      if (!payload) {
         continue;
       }
 
       accounts.push({
         record,
-        auth,
+        payload: toExportPayload(payload),
       });
     }
 
@@ -407,19 +656,36 @@ export class CodexAccountStore {
   }
 
   public async importBundle(sourcePath: string): Promise<number> {
-    const bundle = await this.readJsonFile<ExportBundle>(sourcePath);
-    if (!bundle || bundle.version !== REGISTRY_VERSION || !Array.isArray(bundle.accounts)) {
+    const bundle = await this.readJsonFile<ExportBundle & { version?: number }>(sourcePath);
+    if (!bundle || !Array.isArray(bundle.accounts)) {
       throw new Error("Invalid account bundle.");
     }
 
     let importedCount = 0;
     for (const entry of bundle.accounts) {
-      if (!entry || typeof entry !== "object" || !entry.auth || !entry.record) {
+      if (!entry || typeof entry !== "object" || !entry.record) {
         continue;
       }
 
-      await this.saveSnapshotFromAuth(entry.auth, "import", entry.record);
-      importedCount += 1;
+      const record = normalizeAccountRecord(entry.record as Partial<AccountRecord>);
+      if (isLegacyBundleAuthEntry(entry)) {
+        await this.saveSnapshotFromAuth(entry.auth, "import", record);
+        importedCount += 1;
+        continue;
+      }
+
+      if (!entry.payload || typeof entry.payload !== "object") {
+        continue;
+      }
+      if (entry.payload.kind === "auth" && "auth" in entry.payload) {
+        await this.saveSnapshotFromAuth(entry.payload.auth, "import", record);
+        importedCount += 1;
+        continue;
+      }
+      if (entry.payload.kind === "api" && "api" in entry.payload) {
+        await this.createApiAccount(entry.payload.api, "import", record);
+        importedCount += 1;
+      }
     }
 
     return importedCount;
@@ -429,6 +695,7 @@ export class CodexAccountStore {
     return {
       codexHome: this.codexHome,
       authPath: this.authPath,
+      apiConfigPath: this.apiConfigPath,
       registryPath: this.registryPath,
       runtimeStatePath: this.runtimeStatePath,
       sessionsPath: this.sessionsPath,
@@ -547,7 +814,9 @@ export class CodexAccountStore {
   }
 
   private async readRegistry(): Promise<AccountRegistry> {
-    const registry = await this.readJsonFile<AccountRegistry>(this.registryPath);
+    const registry = await this.readJsonFile<AccountRegistry & { version?: number }>(
+      this.registryPath,
+    );
     if (!registry) {
       return {
         version: REGISTRY_VERSION,
@@ -555,11 +824,16 @@ export class CodexAccountStore {
       };
     }
 
-    if (registry.version !== REGISTRY_VERSION || !Array.isArray(registry.accounts)) {
+    if (!Array.isArray(registry.accounts)) {
       throw new Error("Invalid Codex account registry format.");
     }
 
-    return registry;
+    return {
+      version: REGISTRY_VERSION,
+      accounts: registry.accounts.map((record) =>
+        normalizeAccountRecord(record as Partial<AccountRecord>),
+      ),
+    };
   }
 
   private async writeRegistry(registry: AccountRegistry): Promise<void> {
@@ -574,6 +848,50 @@ export class CodexAccountStore {
 
   private getSnapshotPath(id: string): string {
     return path.join(this.accountsRoot, `${id}.json`);
+  }
+
+  private async readManagedPayload(
+    id: string,
+    expectedKind: AccountRecord["kind"],
+  ): Promise<ManagedAccountPayload | null> {
+    const filePath = this.getSnapshotPath(id);
+    const payload = await this.readJsonFile<{
+      kind?: string;
+      auth?: CodexAuthFile;
+      api?: ApiConfigFile;
+    } & CodexAuthFile>(filePath);
+    if (!payload) {
+      return null;
+    }
+
+    if (payload.kind === "auth" && payload.auth) {
+      return {
+        kind: "auth",
+        auth: cloneAuthFile(payload.auth),
+      };
+    }
+    if (payload.kind === "api" && payload.api) {
+      return {
+        kind: "api",
+        api: cloneApiConfig(payload.api),
+      };
+    }
+
+    if (expectedKind === "auth") {
+      return {
+        kind: "auth",
+        auth: cloneAuthFile(payload as CodexAuthFile),
+      };
+    }
+
+    return null;
+  }
+
+  private async writeSnapshotPayload(
+    id: string,
+    payload: ApiSnapshotFile | { kind: "auth"; auth: CodexAuthFile },
+  ): Promise<void> {
+    await this.writeJsonFile(this.getSnapshotPath(id), payload);
   }
 
   private async readRuntimeState(): Promise<{
@@ -764,6 +1082,73 @@ export class CodexAccountStore {
       // chmod is best-effort only.
     }
   }
+}
+
+function normalizeAccountRecord(input: Partial<AccountRecord>): AccountRecord {
+  const kind = input.kind === "api" ? "api" : "auth";
+  return {
+    id: typeof input.id === "string" ? input.id : "",
+    kind,
+    label: input.label,
+    email: kind === "auth" ? input.email : undefined,
+    name: kind === "auth" ? input.name : undefined,
+    subject: kind === "auth" ? input.subject : undefined,
+    accountId: kind === "auth" ? input.accountId : undefined,
+    chatgptAccountId: kind === "auth" ? input.chatgptAccountId : undefined,
+    authMode: kind === "auth" ? input.authMode : undefined,
+    apiBaseUrl: kind === "api" ? input.apiBaseUrl : undefined,
+    apiKeyMasked: kind === "api" ? input.apiKeyMasked : undefined,
+    models: kind === "api" ? cloneModels(input.models) : undefined,
+    health: kind === "api" ? input.health : undefined,
+    lastHealthCheckedAt: kind === "api" ? input.lastHealthCheckedAt ?? null : null,
+    healthError: kind === "api" ? input.healthError ?? null : null,
+    createdAt: typeof input.createdAt === "string" ? input.createdAt : new Date().toISOString(),
+    updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : new Date().toISOString(),
+    lastCapturedAt:
+      typeof input.lastCapturedAt === "string" ? input.lastCapturedAt : new Date().toISOString(),
+    lastUsedAt: input.lastUsedAt,
+    source: input.source ?? "manual",
+    snapshotHash: typeof input.snapshotHash === "string" ? input.snapshotHash : "",
+    usage: kind === "auth" ? input.usage : undefined,
+    usageCheckedAt: kind === "auth" ? input.usageCheckedAt ?? null : null,
+    usageError: kind === "auth" ? input.usageError ?? null : null,
+  };
+}
+
+function cloneAuthFile(auth: CodexAuthFile): CodexAuthFile {
+  return {
+    ...auth,
+    tokens: auth.tokens ? { ...auth.tokens } : undefined,
+  };
+}
+
+function cloneApiConfig(api: ApiConfigFile): ApiConfigFile {
+  return {
+    baseUrl: api.baseUrl,
+    apiKey: api.apiKey,
+    models: cloneModels(api.models),
+  };
+}
+
+function cloneModels(models: ApiConfigFile["models"] | undefined): ApiConfigFile["models"] {
+  return Array.isArray(models) ? models.map((model) => ({ ...model })) : [];
+}
+
+function toExportPayload(payload: ManagedAccountPayload): ExportBundleEntry["payload"] {
+  return payload.kind === "auth"
+    ? { kind: "auth", auth: cloneAuthFile(payload.auth) }
+    : { kind: "api", api: cloneApiConfig(payload.api) };
+}
+
+function isLegacyBundleAuthEntry(
+  entry: unknown,
+): entry is { record: Partial<AccountRecord>; auth: CodexAuthFile } {
+  return (
+    typeof entry === "object" &&
+    entry !== null &&
+    "auth" in entry &&
+    typeof (entry as { auth?: unknown }).auth === "object"
+  );
 }
 
 function isMissingFileError(error: unknown): boolean {
