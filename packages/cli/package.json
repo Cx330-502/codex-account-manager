@@ -1,7 +1,7 @@
 {
   "name": "codex-account-manager",
-  "version": "3.0.1",
-  "description": "Full-screen TUI CLI for managing Codex account snapshots, usage, and manual token refresh.",
+  "version": "3.0.2",
+  "description": "[ARCHIVED] Full-screen TUI CLI for managing Codex account snapshots, usage, and manual token refresh.",
   "license": "MIT",
   "homepage": "https://github.com/Cx330-502/codex-account-manager#readme",
   "repository": {

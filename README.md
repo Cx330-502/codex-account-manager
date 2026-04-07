@@ -1,5 +1,7 @@
 # Codex Account Manager
 
+> Archived: this project is now in maintenance-only mode, and further feature development is unlikely.
+
 一个 VS Code 扩展，用来管理多个 Codex / ChatGPT 官方账号快照。插件只切换 `~/.codex/auth.json`，因此本地 `sessions/`、`memories/`、`state_5.sqlite` 会天然保持共通，不会因为切账号而被分叉。
 
 仓库现在也提供同源 CLI：`codex-accounts`。CLI 是全屏 TUI，支持方向键上下选择、回车确认和静默状态刷新；默认是手动模式，可切到 `usage-auto`，但依然坚持“`usage` 可以自动刷新，`token refresh` 必须手动触发”。

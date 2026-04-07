@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [3.0.2] - 2026-04-07
+
+- Marked the project as archived / maintenance-only across repository docs and package metadata.
+- Clarified that future development is unlikely, so the current extension and CLI behavior should be considered mostly frozen after the mixed `auth` + `api` account release.
+
 ## [3.0.1] - 2026-04-07
 
 - Prepared aligned `3.0.1` VSIX and npm package metadata for the mixed `auth` + `api` account release.
