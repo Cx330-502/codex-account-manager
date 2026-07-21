@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog.
 
+## [3.1.0] - 2026-07-21
+
+- Replaced the fixed `5h / 1w` assumption with duration-driven quota windows, so weekly-only, monthly, future, and legacy account responses render without phantom cards or misleading labels.
+- Added read-only Codex rate-limit reset credit information: available count from usage plus best-effort expiry details from the dedicated reset-credit endpoint.
+- Added credential health for access, refresh, and ID tokens, including presence, non-secret fingerprints, embedded expiry, and last refresh time.
+- Added explicit token copy actions handled entirely by the extension host; raw credentials are never injected into the Webview DOM.
+- Added a dismissible, one-campaign recommendation card for Agent Terminal Panel. It is hidden when that extension is installed and permanently dismissed after either action.
+- Added fixture-based tests for dynamic quota windows, reset-credit parsing, and token redaction.
+
 ## [3.0.2] - 2026-04-07
 
 - Marked the project as archived / maintenance-only across repository docs and package metadata.

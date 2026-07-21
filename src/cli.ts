@@ -31,7 +31,6 @@ import type {
   ManagedAccount,
   ManagedThreadSummary,
   ManagerWorkspaceRegistry,
-  UsageWindowSummary,
   WorkspacePaneRecord,
 } from "./types";
 import { UsageService } from "./usage";
@@ -277,7 +276,7 @@ class CodexAccountsCliApp {
           },
         },
       },
-      data: [["#", "A", "Account", "5h", "1w", "Status"]],
+      data: [["#", "A", "Account", "Quota", "Status"]],
       scrollbar: {
         ch: " ",
       },
@@ -1195,19 +1194,17 @@ class CodexAccountsCliApp {
     const narrow = (this.screen.width as number) < 120;
     const header = narrow
       ? ["#", "Type", "Live", "Account", "Info", "Status"]
-      : ["#", "Type", "Live", "Account", "Info", "5h", "1w", "Recent", "Status"];
+      : ["#", "Type", "Live", "Account", "Info", "Quota", "Recent", "Status"];
     const rows = [header];
 
     if (this.accounts.length === 0) {
       rows.push(
         narrow
           ? ["-", "-", "-", "No accounts", "-", "-"]
-          : ["-", "-", "-", "No accounts", "-", "-", "-", "-", "-"],
+          : ["-", "-", "-", "No accounts", "-", "-", "-", "-"],
       );
     } else {
       for (const [index, account] of this.accounts.entries()) {
-        const fiveHour = findWindow(account, "5h");
-        const weekly = findWindow(account, "1w");
         const status = truncate(buildAccountStatus(account), narrow ? 18 : 34);
         const accountLabel = account.isActive
           ? `CURRENT ${getAccountLabel(account.record)}`
@@ -1235,8 +1232,7 @@ class CodexAccountsCliApp {
             liveMarker,
             truncate(accountLabel, 28),
             info,
-            formatRemaining(fiveHour),
-            formatRemaining(weekly),
+            truncate(formatQuotaSummary(account), 24),
             truncate(account.record.lastHealthCheckedAt ?? account.record.usageCheckedAt ?? "--", 18),
             status,
           ]);
@@ -1979,18 +1975,21 @@ class CodexAccountsCliApp {
   }
 }
 
-function findWindow(
-  account: ManagedAccount,
-  key: UsageWindowSummary["key"],
-): UsageWindowSummary | undefined {
-  return account.record.usage?.windows.find((window) => window.key === key);
-}
-
-function formatRemaining(window: UsageWindowSummary | undefined): string {
-  if (typeof window?.remainingPercent === "number") {
-    return `${window.remainingPercent}%`;
+function formatQuotaSummary(account: ManagedAccount): string {
+  const usage = account.record.usage;
+  if (!usage) {
+    return "--";
   }
-  return "--";
+
+  const parts = usage.windows.flatMap((window) =>
+    typeof window.remainingPercent === "number"
+      ? [`${window.label} ${window.remainingPercent}%`]
+      : [],
+  );
+  if (usage.resetCredits) {
+    parts.push(`resets ${usage.resetCredits.availableCount}`);
+  }
+  return parts.length > 0 ? parts.join(" | ") : usage.creditLabel || "--";
 }
 
 function formatTimestamp(value: string): string {

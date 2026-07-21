@@ -734,7 +734,9 @@ export class CodexAccountsController implements vscode.Disposable {
     let lastError: unknown;
     while (attempt < maxAttempts) {
       try {
-        return await this.usageService.fetchUsage(auth);
+        return await this.usageService.fetchUsage(auth, {
+          includeResetCreditDetails: !isBackgroundRefresh,
+        });
       } catch (error) {
         lastError = error;
         const failureKind = toUsageFailureInfo(toErrorMessage(error)).kind;

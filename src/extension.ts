@@ -25,6 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const sidebarProvider = new CodexAccountsSidebarProvider(
     context.extensionUri,
     controller,
+    context,
   );
   context.subscriptions.push(sidebarProvider);
   const statusBar = new CodexAccountsStatusBarController(controller);

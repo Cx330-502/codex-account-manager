@@ -13,6 +13,7 @@ This file is for contributors. End-user usage is documented in `README.md`.
 ```bash
 npm install
 npm run build
+npm test
 ```
 
 ## Run In Extension Development Host

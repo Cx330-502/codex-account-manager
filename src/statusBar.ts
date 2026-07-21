@@ -54,7 +54,7 @@ export class CodexAccountsStatusBarController implements vscode.Disposable {
 
     const currentWindowAccount = state.currentWindowAccount;
     if (!currentWindowAccount.account) {
-      this.item.text = "$(pulse) 5h -- | 1w --";
+      this.item.text = "$(pulse) Quota --";
       this.item.tooltip = buildUnavailableTooltip(currentWindowAccount, state);
       this.item.show();
       this.renderRestartState(state);
@@ -137,24 +137,23 @@ function getAlignment(): vscode.StatusBarAlignment {
 
 function summarizeUsage(active: ManagedAccount): string {
   if (active.record.kind !== "auth") {
-    return "5h -- | 1w --";
+    return "Quota --";
   }
   const usage = active.record.usage;
   if (!usage) {
-    return "5h -- | 1w --";
+    return "Quota --";
   }
 
-  const fiveHour = usage.windows.find((window) => window.key === "5h")?.remainingPercent;
-  const weekly = usage.windows.find((window) => window.key === "1w")?.remainingPercent;
-  const parts: string[] = [];
-  if (fiveHour != null) {
-    parts.push(`5h ${fiveHour}%`);
-  }
-  if (weekly != null) {
-    parts.push(`1w ${weekly}%`);
+  const parts = usage.windows.flatMap((window) =>
+    window.remainingPercent == null
+      ? []
+      : [`${window.label} ${window.remainingPercent}%`],
+  );
+  if (usage.resetCredits) {
+    parts.push(`resets ${usage.resetCredits.availableCount}`);
   }
   if (parts.length === 0) {
-    return "5h -- | 1w --";
+    return usage.creditLabel || "Quota --";
   }
 
   return parts.join(" | ");
@@ -205,13 +204,16 @@ function buildTooltip(
     }
     return lines.join("\n");
   }
-  const fiveHour = usage.windows.find((window) => window.key === "5h");
-  const weekly = usage.windows.find((window) => window.key === "1w");
-  if (fiveHour) {
-    lines.push(`5h remaining: ${fiveHour.remainingPercent ?? "--"}%`);
+  for (const window of usage.windows) {
+    lines.push(
+      `${window.label} remaining: ${window.remainingPercent ?? "--"}%${window.resetsAt ? `; resets ${window.resetsAt}` : ""}`,
+    );
   }
-  if (weekly) {
-    lines.push(`1w remaining: ${weekly.remainingPercent ?? "--"}%`);
+  if (usage.resetCredits) {
+    lines.push(`Rate-limit reset credits: ${usage.resetCredits.availableCount}`);
+    if (usage.resetCredits.nextExpiresAt) {
+      lines.push(`Next reset credit expiry: ${usage.resetCredits.nextExpiresAt}`);
+    }
   }
   if (active.record.usageError) {
     const failure = toUsageFailureInfo(active.record.usageError);

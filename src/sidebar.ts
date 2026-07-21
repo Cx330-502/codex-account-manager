@@ -5,8 +5,16 @@ import * as vscode from "vscode";
 import { getAccountLabel } from "./auth";
 import type { ControllerState } from "./controller";
 import { CodexAccountsController } from "./controller";
+import {
+  getAuthToken,
+  summarizeCredentialHealth,
+  type AuthTokenKind,
+} from "./credentialHealth";
 import type { ManagedAccount, UsageWindowSummary } from "./types";
 import { toUsageFailureInfo } from "./usageFailure";
+
+const AGENT_TERMINAL_PANEL_EXTENSION_ID = "cx330-502.agent-terminal-panel";
+const PROMOTION_DISMISSED_KEY = "agentTerminalPanelPromotion.dismissed.v1";
 
 type SidebarMessage =
   | { type: "ready" }
@@ -26,7 +34,10 @@ type SidebarMessage =
   | { type: "switchAccount"; id: string }
   | { type: "renameAccount"; id: string }
   | { type: "removeAccount"; id: string }
-  | { type: "refreshUsage"; id?: string };
+  | { type: "refreshUsage"; id?: string }
+  | { type: "copyToken"; id: string; tokenKind: AuthTokenKind }
+  | { type: "dismissPromotion" }
+  | { type: "openAgentTerminalPanel" };
 
 export class CodexAccountsSidebarProvider
   implements vscode.WebviewViewProvider, vscode.Disposable
@@ -38,6 +49,7 @@ export class CodexAccountsSidebarProvider
   public constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly controller: CodexAccountsController,
+    private readonly context: vscode.ExtensionContext,
   ) {
     this.disposables.push(
       this.controller.onDidChangeState(() => {
@@ -139,9 +151,47 @@ export class CodexAccountsSidebarProvider
           message.id,
         );
         break;
+      case "copyToken":
+        await this.copyToken(message.id, message.tokenKind);
+        break;
+      case "dismissPromotion":
+        await this.context.globalState.update(PROMOTION_DISMISSED_KEY, true);
+        await this.postState();
+        break;
+      case "openAgentTerminalPanel":
+        await this.context.globalState.update(PROMOTION_DISMISSED_KEY, true);
+        await this.postState();
+        await vscode.env.openExternal(
+          vscode.Uri.parse(`vscode:extension/${AGENT_TERMINAL_PANEL_EXTENSION_ID}`),
+        );
+        break;
       default:
         break;
     }
+  }
+
+  private async copyToken(id: string, tokenKind: AuthTokenKind): Promise<void> {
+    const state = this.controller.getState();
+    const account =
+      state.accounts.find((entry) => entry.record.id === id) ??
+      (state.currentWindowAccount.account?.record.id === id
+        ? state.currentWindowAccount.account
+        : null);
+    if (!account || account.payload.kind !== "auth") {
+      vscode.window.showWarningMessage("This managed auth snapshot is unavailable.");
+      return;
+    }
+
+    const token = getAuthToken(account.payload.auth, tokenKind);
+    if (!token) {
+      vscode.window.showWarningMessage(`${formatTokenKind(tokenKind)} token is unavailable.`);
+      return;
+    }
+
+    await vscode.env.clipboard.writeText(token);
+    vscode.window.showInformationMessage(
+      `${formatTokenKind(tokenKind)} token copied. Treat clipboard contents as a secret.`,
+    );
   }
 
   private async postState(): Promise<void> {
@@ -176,6 +226,7 @@ export class CodexAccountsSidebarProvider
           healthStatus: null,
           healthCheckedAt: null,
           healthError: null,
+          tokenHealth: null,
           isActive: false,
           isManaged: false,
           planType: null,
@@ -189,6 +240,7 @@ export class CodexAccountsSidebarProvider
           lastCapturedAt: null,
           lastUsedAt: null,
           windows: [],
+          resetCredits: null,
         };
 
     return {
@@ -198,10 +250,18 @@ export class CodexAccountsSidebarProvider
         "Auth switches update auth.json. API switches update api-live.json. sessions / memories / state_5.sqlite stay shared.",
       sharedPaths: state.sharedState,
       restart: state.restart,
+      showPromotion: this.shouldShowPromotion(),
       currentWindowAccount,
       liveApiAccount: state.liveApiAccount ? toViewAccount(state.liveApiAccount) : null,
       accounts: accounts.map((account) => toViewAccount(account)),
     };
+  }
+
+  private shouldShowPromotion(): boolean {
+    return (
+      !this.context.globalState.get<boolean>(PROMOTION_DISMISSED_KEY, false) &&
+      !vscode.extensions.getExtension(AGENT_TERMINAL_PANEL_EXTENSION_ID)
+    );
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -295,6 +355,64 @@ export class CodexAccountsSidebarProvider
         gap: 4px;
         font-size: 12px;
         color: var(--muted);
+      }
+
+      .promotion {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--panel-border));
+        border-radius: 18px;
+        padding: 15px 44px 15px 15px;
+        background:
+          radial-gradient(circle at 90% 10%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 42%),
+          linear-gradient(135deg, color-mix(in srgb, var(--panel-strong) 94%, #6c5ce7), var(--panel));
+        box-shadow: var(--shadow);
+      }
+
+      .promotion-kicker {
+        color: var(--accent-strong);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .promotion-title {
+        margin-top: 5px;
+        font-size: 16px;
+        font-weight: 800;
+      }
+
+      .promotion-copy {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .promotion-actions {
+        margin-top: 12px;
+      }
+
+      .promotion-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 0;
+        border-radius: 8px;
+        color: var(--muted);
+        background: transparent;
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+      }
+
+      .promotion-close:hover {
+        color: var(--fg);
+        background: color-mix(in srgb, var(--panel-strong) 84%, transparent);
       }
 
       .section {
@@ -644,6 +762,107 @@ export class CodexAccountsSidebarProvider
         color: var(--muted);
       }
 
+      .reset-credit-banner,
+      .credential-health {
+        margin-top: 12px;
+        border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+        border-radius: 14px;
+        background: color-mix(in srgb, var(--panel-strong) 84%, transparent);
+        padding: 11px 12px;
+      }
+
+      .reset-credit-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .reset-credit-count {
+        font-size: 18px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .reset-credit-copy,
+      .credential-copy {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
+      .credential-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .credential-head strong {
+        font-size: 12px;
+      }
+
+      .token-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px;
+        margin-top: 9px;
+      }
+
+      .token-item {
+        min-width: 0;
+        border-radius: 10px;
+        padding: 8px;
+        background: color-mix(in srgb, var(--panel) 76%, transparent);
+      }
+
+      .token-name {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .token-state {
+        margin-top: 4px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .token-meta {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.35;
+        overflow-wrap: anywhere;
+      }
+
+      .token-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 9px;
+      }
+
+      .token-button {
+        border: 1px solid var(--panel-border);
+        border-radius: 9px;
+        padding: 6px 8px;
+        color: var(--fg);
+        background: color-mix(in srgb, var(--panel) 76%, transparent);
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .credential-compact {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 7px;
+      }
+
       .compact-foot {
         margin-top: 10px;
         gap: 3px;
@@ -761,13 +980,34 @@ export class CodexAccountsSidebarProvider
       @media (max-width: 340px) {
         .tools,
         .usage-grid,
-        .compact-metrics {
+        .compact-metrics,
+        .token-grid {
           grid-template-columns: 1fr;
         }
 
         .stat.span-2,
         .metric-chip.span-2 {
           grid-column: span 1;
+        }
+
+        .reset-credit-banner,
+        .credential-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+
+      @media (min-width: 600px) {
+        body {
+          padding: 20px;
+        }
+
+        .tools {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .compact-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
     </style>
@@ -795,7 +1035,12 @@ export class CodexAccountsSidebarProvider
         }
         const action = target.dataset.action;
         const id = target.dataset.id;
-        vscode.postMessage(id ? { type: action, id } : { type: action });
+        const tokenKind = target.dataset.tokenKind;
+        vscode.postMessage({
+          type: action,
+          ...(id ? { id } : {}),
+          ...(tokenKind ? { tokenKind } : {}),
+        });
       });
 
       setInterval(() => {
@@ -827,6 +1072,7 @@ export class CodexAccountsSidebarProvider
         const restartBanner = state.restart?.thisWindowNeedsReload
           ? renderRestartBanner(state.restart)
           : "";
+        const promotion = state.showPromotion ? renderPromotion() : "";
         const currentAccount =
           currentWindowAccount &&
           (currentWindowAccount.id || currentWindowAccount.label || currentWindowAccount.isManaged)
@@ -856,10 +1102,29 @@ export class CodexAccountsSidebarProvider
               <div><strong>state_5.sqlite</strong> stays shared across accounts</div>
             </div>
           </section>
+          \${promotion}
           \${restartBanner}
           <section class="tools">\${tools}</section>
           \${state.lastError ? \`<section class="error">\${escapeHtml(state.lastError)}</section>\` : ""}
           <section class="list">\${accountMarkup}</section>
+        \`;
+      }
+
+      function renderPromotion() {
+        return \`
+          <aside class="promotion" aria-label="Agent Terminal Panel recommendation">
+            <button class="promotion-close" data-action="dismissPromotion" aria-label="不再显示">×</button>
+            <div class="promotion-kicker">From Cx330-502</div>
+            <div class="promotion-title">多账号之外，还需要并行运行多个 Agent？</div>
+            <div class="promotion-copy">
+              Agent Terminal Panel 直接运行 Codex、Claude Code、Gemini CLI 等厂商原生 CLI，
+              无需等待中间层适配，第一时间体验 Agent 厂商最新功能；同时支持多会话、历史恢复、
+              通信状态与 WSL / SSH。
+            </div>
+            <div class="promotion-actions">
+              <button class="card-button" data-action="openAgentTerminalPanel">查看 Agent Terminal Panel</button>
+            </div>
+          </aside>
         \`;
       }
 
@@ -943,9 +1208,6 @@ export class CodexAccountsSidebarProvider
           badges.push(\`<span class="badge">\${escapeHtml(account.planType)}</span>\`);
         }
 
-        const windows = new Map((account.windows || []).map((window) => [window.key, window]));
-        const fiveHour = windows.get("5h");
-        const weekly = windows.get("1w");
         const usageMeta = renderUsageMeta(account);
 
         return \`
@@ -960,9 +1222,11 @@ export class CodexAccountsSidebarProvider
 
             <div class="usage-grid current-grid">
               \${renderCreditStat(account.creditLabel, true)}
-              \${renderWindowStat("5h Window", fiveHour)}
-              \${renderWindowStat("1 Week", weekly)}
+              \${renderWindowStats(account.windows, false)}
             </div>
+
+            \${renderResetCredits(account.resetCredits)}
+            \${renderCredentialHealth(account, true)}
 
             <div class="account-foot">
               <div>\${usageMeta}</div>
@@ -1000,10 +1264,6 @@ export class CodexAccountsSidebarProvider
           badges.push(\`<span class="badge">\${escapeHtml(account.planType)}</span>\`);
         }
 
-        const windows = new Map((account.windows || []).map((window) => [window.key, window]));
-        const fiveHour = windows.get("5h");
-        const weekly = windows.get("1w");
-
         return \`
           <article class="account-card compact-card">
             <div class="account-head">
@@ -1016,9 +1276,11 @@ export class CodexAccountsSidebarProvider
 
             <div class="compact-metrics">
               \${renderCreditChip(account.creditLabel)}
-              \${renderCompactWindowChip("5h", fiveHour)}
-              \${renderCompactWindowChip("1w", weekly)}
+              \${renderWindowStats(account.windows, true)}
             </div>
+
+            \${renderResetCredits(account.resetCredits)}
+            \${renderCredentialHealth(account, false)}
 
             <div class="account-foot compact-foot">
               <div>\${renderUsageMeta(account, true)}</div>
@@ -1094,6 +1356,117 @@ export class CodexAccountsSidebarProvider
         \`;
       }
 
+      function renderWindowStats(windows, compact) {
+        const items = Array.isArray(windows) ? windows : [];
+        return items
+          .map((window) => {
+            const title = [window.limitName, window.label]
+              .filter(Boolean)
+              .join(" · ");
+            return compact
+              ? renderCompactWindowChip(title || "Quota", window, items.length === 1)
+              : renderWindowStat(title || "Quota window", window);
+          })
+          .join("");
+      }
+
+      function renderResetCredits(resetCredits) {
+        if (!resetCredits || typeof resetCredits.availableCount !== "number") {
+          return "";
+        }
+        const expiry = resetCredits.nextExpiresAt
+          ? \`Next expires \${escapeHtml(formatResetAbsolute(resetCredits.nextExpiresAt))} · \${escapeHtml(formatResetRelative(resetCredits.nextExpiresAt))}\`
+          : "Expiry details unavailable";
+        return \`
+          <div class="reset-credit-banner">
+            <div>
+              <div class="credential-copy">Rate-limit reset credits</div>
+              <div class="reset-credit-copy">\${expiry}</div>
+            </div>
+            <div class="reset-credit-count">\${escapeHtml(String(resetCredits.availableCount))} available</div>
+          </div>
+        \`;
+      }
+
+      function renderCredentialHealth(account, expanded) {
+        const health = account.tokenHealth;
+        if (!health) {
+          return "";
+        }
+
+        if (!expanded) {
+          const accessState = describeTokenState(health.access);
+          const refreshState = health.refresh?.present ? "Refresh ready" : "No refresh token";
+          return \`
+            <div class="credential-health credential-compact">
+              <div>
+                <div class="credential-copy">Credential health</div>
+                <div class="token-state">\${escapeHtml(accessState)} · \${escapeHtml(refreshState)}</div>
+                <div class="token-meta">\${health.lastRefreshAt ? \`Last refreshed \${escapeHtml(formatWhen(health.lastRefreshAt))}\` : "Refresh time unavailable"}</div>
+              </div>
+              \${health.refresh?.present ? renderTokenButton(account.id, "refresh", "Copy refresh") : ""}
+            </div>
+          \`;
+        }
+
+        return \`
+          <section class="credential-health">
+            <div class="credential-head">
+              <strong>Credential health</strong>
+              <span class="credential-copy">Raw tokens stay outside the Webview and are copied only on request.</span>
+            </div>
+            <div class="token-grid">
+              \${renderTokenItem("Access token", health.access, null)}
+              \${renderTokenItem("Refresh token", health.refresh, health.lastRefreshAt)}
+              \${renderTokenItem("ID token", health.id, null)}
+            </div>
+            <div class="token-actions">
+              \${health.access?.present ? renderTokenButton(account.id, "access", "Copy access") : ""}
+              \${health.refresh?.present ? renderTokenButton(account.id, "refresh", "Copy refresh") : ""}
+              \${health.id?.present ? renderTokenButton(account.id, "id", "Copy ID") : ""}
+            </div>
+          </section>
+        \`;
+      }
+
+      function renderTokenItem(name, token, lastRefreshAt) {
+        const fingerprint = token?.fingerprint
+          ? \`fp \${escapeHtml(token.fingerprint)}\`
+          : "No fingerprint";
+        let timing = "No embedded expiry";
+        if (token?.expiresAt) {
+          timing = \`Expires \${escapeHtml(formatResetCompact(token.expiresAt))} · \${escapeHtml(formatResetRelative(token.expiresAt))}\`;
+        } else if (lastRefreshAt) {
+          timing = \`Rotated \${escapeHtml(formatWhen(lastRefreshAt))}\`;
+        }
+        return \`
+          <div class="token-item">
+            <div class="token-name">\${escapeHtml(name)}</div>
+            <div class="token-state">\${token?.present ? "Present" : "Missing"}</div>
+            <div class="token-meta">\${token?.present ? fingerprint : "Not stored"}</div>
+            <div class="token-meta">\${token?.present ? timing : "Re-login to restore"}</div>
+          </div>
+        \`;
+      }
+
+      function renderTokenButton(accountId, tokenKind, label) {
+        return \`<button class="token-button" data-action="copyToken" data-id="\${escapeAttr(accountId)}" data-token-kind="\${escapeAttr(tokenKind)}">\${escapeHtml(label)}</button>\`;
+      }
+
+      function describeTokenState(token) {
+        if (!token?.present) {
+          return "Access missing";
+        }
+        if (!token.expiresAt) {
+          return "Access present";
+        }
+        const expiresAt = new Date(token.expiresAt).getTime();
+        if (Number.isNaN(expiresAt)) {
+          return "Access present";
+        }
+        return expiresAt <= Date.now() ? "Access expired" : "Access valid";
+      }
+
       function renderCreditStat(label, emphasize) {
         return \`
           <div class="stat span-2 \${emphasize ? "status-neutral" : ""}">
@@ -1147,10 +1520,10 @@ export class CodexAccountsSidebarProvider
         \`;
       }
 
-      function renderCompactWindowChip(label, window) {
+      function renderCompactWindowChip(label, window, fullWidth) {
         if (!window) {
           return \`
-            <div class="metric-chip">
+            <div class="metric-chip \${fullWidth ? "span-2" : ""}">
               <div class="metric-label">\${escapeHtml(label)}</div>
               <div class="metric-value">--</div>
               <div class="metric-meta">No window data</div>
@@ -1162,7 +1535,7 @@ export class CodexAccountsSidebarProvider
         const tone = getUsageTone(remaining);
         const compactReset = window.resetsAt ? formatResetCompact(window.resetsAt) : "Unknown";
         return \`
-          <div class="metric-chip \${tone}">
+          <div class="metric-chip \${tone} \${fullWidth ? "span-2" : ""}">
             <div class="metric-label">\${escapeHtml(label)}</div>
             <div class="metric-value">\${remaining == null ? "--" : escapeHtml(String(remaining) + "%")}</div>
             <div class="metric-meta">\${window.resetsAt ? \`Reset \${escapeHtml(compactReset)}\` : "Reset unavailable"}</div>
@@ -1388,6 +1761,14 @@ export class CodexAccountsSidebarProvider
 
 type SidebarSortOrder =
   | "default"
+  | "shortestResetAsc"
+  | "shortestResetDesc"
+  | "longestResetAsc"
+  | "longestResetDesc"
+  | "shortestRemainingAsc"
+  | "shortestRemainingDesc"
+  | "longestRemainingAsc"
+  | "longestRemainingDesc"
   | "fiveHourResetAsc"
   | "fiveHourResetDesc"
   | "weeklyResetAsc"
@@ -1403,6 +1784,14 @@ function getSidebarSortOrder(): SidebarSortOrder {
     .get<string>("sidebarSortOrder", "default");
 
   switch (value) {
+    case "shortestResetAsc":
+    case "shortestResetDesc":
+    case "longestResetAsc":
+    case "longestResetDesc":
+    case "shortestRemainingAsc":
+    case "shortestRemainingDesc":
+    case "longestRemainingAsc":
+    case "longestRemainingDesc":
     case "fiveHourResetAsc":
     case "fiveHourResetDesc":
     case "weeklyResetAsc":
@@ -1471,6 +1860,10 @@ function toViewAccount(account: ManagedAccount): Record<string, unknown> {
       account.record.health?.checkedAt ??
       null,
     healthError: account.record.healthError ?? null,
+    tokenHealth:
+      account.payload.kind === "auth"
+        ? summarizeCredentialHealth(account.payload.auth)
+        : null,
     isActive: account.isActive,
     isManaged: true,
     planType: account.record.usage?.planType ?? null,
@@ -1487,6 +1880,7 @@ function toViewAccount(account: ManagedAccount): Record<string, unknown> {
     lastCapturedAt: account.record.lastCapturedAt,
     lastUsedAt: account.record.lastUsedAt ?? null,
     windows: account.record.usage?.windows ?? [],
+    resetCredits: account.record.usage?.resetCredits ?? null,
   };
 }
 
@@ -1516,22 +1910,27 @@ function getSortMetricValue(
   account: ManagedAccount,
   sortOrder: Exclude<SidebarSortOrder, "default">,
 ): number | null {
-  if (sortOrder.startsWith("fiveHour")) {
+  const window = getSortWindow(
+    account,
+    sortOrder.startsWith("fiveHour") || sortOrder.startsWith("shortest")
+      ? "shortest"
+      : "longest",
+  );
+  if (sortOrder.startsWith("fiveHour") || sortOrder.startsWith("shortest")) {
     return sortOrder.includes("Reset")
-      ? getWindowResetTimestamp(account, "5h")
-      : getWindowRemainingPercent(account, "5h");
+      ? getWindowResetTimestamp(window)
+      : getWindowRemainingPercent(window);
   }
 
   return sortOrder.includes("Reset")
-    ? getWindowResetTimestamp(account, "1w")
-    : getWindowRemainingPercent(account, "1w");
+    ? getWindowResetTimestamp(window)
+    : getWindowRemainingPercent(window);
 }
 
 function getWindowResetTimestamp(
-  account: ManagedAccount,
-  key: UsageWindowSummary["key"],
+  window: UsageWindowSummary | undefined,
 ): number | null {
-  const resetsAt = findWindow(account, key)?.resetsAt;
+  const resetsAt = window?.resetsAt;
   if (!resetsAt) {
     return null;
   }
@@ -1541,20 +1940,35 @@ function getWindowResetTimestamp(
 }
 
 function getWindowRemainingPercent(
-  account: ManagedAccount,
-  key: UsageWindowSummary["key"],
+  window: UsageWindowSummary | undefined,
 ): number | null {
-  const remaining = findWindow(account, key)?.remainingPercent;
+  const remaining = window?.remainingPercent;
   return typeof remaining === "number" ? remaining : null;
 }
 
-function findWindow(
+function getSortWindow(
   account: ManagedAccount,
-  key: UsageWindowSummary["key"],
+  position: "shortest" | "longest",
 ): UsageWindowSummary | undefined {
-  return account.record.usage?.windows.find((window) => window.key === key);
+  const windows = [...(account.record.usage?.windows ?? [])].sort((left, right) => {
+    const leftMinutes = left.windowMinutes ?? Number.POSITIVE_INFINITY;
+    const rightMinutes = right.windowMinutes ?? Number.POSITIVE_INFINITY;
+    return leftMinutes - rightMinutes;
+  });
+  return position === "shortest" ? windows[0] : windows[windows.length - 1];
 }
 
 function createNonce(): string {
   return randomBytes(16).toString("base64");
+}
+
+function formatTokenKind(tokenKind: AuthTokenKind): string {
+  switch (tokenKind) {
+    case "access":
+      return "Access";
+    case "refresh":
+      return "Refresh";
+    case "id":
+      return "ID";
+  }
 }

@@ -1,8 +1,8 @@
 # Codex Account Manager CLI
 
-> Archived: this CLI is now in maintenance-only mode, and further feature development is unlikely.
+> `3.1.0` 是计划中的最终功能版本；后续以兼容性与安全维护为主。
 
-`codex-accounts` 是一个全屏 TUI，用来管理多个 Codex / ChatGPT 官方账号快照，并查看 `5h / 1周` usage。
+`codex-accounts` 是一个全屏 TUI，用来管理多个 Codex / ChatGPT 官方账号快照，并按接口实际返回的窗口查看 usage。
 
 ## 特点
 

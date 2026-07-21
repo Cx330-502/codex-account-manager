@@ -58,13 +58,19 @@ export interface AccountIdentity {
 }
 
 export interface UsageWindowSummary {
-  key: "5h" | "1w";
+  key: string;
   label: string;
   limitName: string | null;
   windowMinutes: number | null;
   usedPercent: number | null;
   remainingPercent: number | null;
   resetsAt: string | null;
+}
+
+export interface UsageResetCreditsSummary {
+  availableCount: number;
+  expiresAt: string[];
+  nextExpiresAt: string | null;
 }
 
 export interface UsageSnapshot {
@@ -75,6 +81,7 @@ export interface UsageSnapshot {
   creditBalance: number | null;
   creditLabel: string;
   windows: UsageWindowSummary[];
+  resetCredits?: UsageResetCreditsSummary;
 }
 
 export interface AccountRecord {

@@ -9,6 +9,7 @@ node_modules/**
 *.tar.gz
 package-lock.json
 packages/**
+test/**
 out/cli.js
 out/cli.js.map
 out/cliConfig.js

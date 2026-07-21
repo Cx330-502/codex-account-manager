@@ -1,7 +1,12 @@
 import { spawn } from "node:child_process";
 
 import { decodeJwtClaims, deriveAccountIdentity } from "./auth";
-import type { CodexAuthFile, UsageSnapshot, UsageWindowSummary } from "./types";
+import type {
+  CodexAuthFile,
+  UsageResetCreditsSummary,
+  UsageSnapshot,
+  UsageWindowSummary,
+} from "./types";
 
 const BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
 const ORIGINATOR = "codex_vscode";
@@ -10,9 +15,7 @@ const STATUS_MARKER = "__CODEX_STATUS__:";
 const TOKEN_REFRESH_ENDPOINT = "https://auth.openai.com/oauth/token";
 const TOKEN_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_REFRESH_STALE_MS = 8 * 24 * 60 * 60 * 1000;
-const MINUTES_IN_DAY = 24 * 60;
-const FIVE_HOUR_WINDOW_MINUTES = 5 * 60;
-const WEEKLY_WINDOW_MINUTES = 7 * MINUTES_IN_DAY;
+const RESET_CREDITS_ENDPOINT = `${BACKEND_BASE_URL}/wham/rate-limit-reset-credits`;
 
 type RateLimitWindowPayload = {
   limit_window_seconds?: number | string | null;
@@ -26,6 +29,11 @@ type RateLimitWindowPayload = {
 type RateLimitPayload = {
   primary_window?: RateLimitWindowPayload | null;
   secondary_window?: RateLimitWindowPayload | null;
+};
+
+type RateLimitResetCreditsPayload = {
+  available_count?: number | string | null;
+  availableCount?: number | string | null;
 };
 
 type AdditionalRateLimitPayload = {
@@ -51,13 +59,32 @@ type RateLimitStatusPayload = {
   promo?: unknown;
   rate_limit?: RateLimitPayload | null;
   rate_limit_name?: string | null;
+  rate_limit_reset_credits?: RateLimitResetCreditsPayload | null;
+  rateLimitResetCredits?: RateLimitResetCreditsPayload | null;
   user_id?: string | null;
+};
+
+type ResetCreditPayload = {
+  expires_at?: string | null;
+  expiresAt?: string | null;
+  reset_type?: string | null;
+  resetType?: string | null;
+  status?: string | null;
+};
+
+type ResetCreditsPayload = RateLimitResetCreditsPayload & {
+  credits?: ResetCreditPayload[] | null;
 };
 
 type NormalizedRateWindow = {
   windowMinutes: number;
   usedPercent: number;
   resetsAt: number | null;
+};
+
+type NormalizedWindowEntry = {
+  key: "primary" | "secondary";
+  window: NormalizedRateWindow;
 };
 
 type UsageResponse<T> = {
@@ -74,6 +101,7 @@ export interface UsageFetchResult {
 
 export interface UsageFetchOptions {
   allowTokenRefresh?: boolean;
+  includeResetCreditDetails?: boolean;
 }
 
 export class UsageService {
@@ -82,6 +110,7 @@ export class UsageService {
     options: UsageFetchOptions = {},
   ): Promise<UsageFetchResult> {
     const allowTokenRefresh = options.allowTokenRefresh ?? true;
+    const includeResetCreditDetails = options.includeResetCreditDetails ?? true;
     let workingAuth = cloneAuthFile(auth);
     let authRefreshed = false;
 
@@ -106,12 +135,12 @@ export class UsageService {
 
     const endpoint = `${BACKEND_BASE_URL}/wham/usage`;
     try {
-      const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
       return {
-        usage: parseUsagePayload(response.body, {
-          fetchedAt: response.fetchedAt,
-          sourceTimestamp: response.sourceTimestamp,
-        }),
+        usage: await this.fetchUsageSnapshot(
+          endpoint,
+          headers,
+          includeResetCreditDetails,
+        ),
         auth: workingAuth,
         authRefreshed,
       };
@@ -129,12 +158,12 @@ export class UsageService {
         throw new Error("Token refresh succeeded but access token is still missing.");
       }
       headers.set("Authorization", `Bearer ${retriedAccessToken}`);
-      const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
       return {
-        usage: parseUsagePayload(response.body, {
-          fetchedAt: response.fetchedAt,
-          sourceTimestamp: response.sourceTimestamp,
-        }),
+        usage: await this.fetchUsageSnapshot(
+          endpoint,
+          headers,
+          includeResetCreditDetails,
+        ),
         auth: workingAuth,
         authRefreshed: true,
       };
@@ -143,6 +172,46 @@ export class UsageService {
 
   public async refreshTokens(auth: CodexAuthFile): Promise<CodexAuthFile> {
     return this.refreshAuthTokens(auth);
+  }
+
+  private async fetchUsageSnapshot(
+    endpoint: string,
+    headers: Map<string, string>,
+    includeResetCreditDetails: boolean,
+  ): Promise<UsageSnapshot> {
+    const response = await this.requestJson<RateLimitStatusPayload>(endpoint, headers);
+    const usage = parseUsagePayload(response.body, {
+      fetchedAt: response.fetchedAt,
+      sourceTimestamp: response.sourceTimestamp,
+    });
+    if (
+      !includeResetCreditDetails ||
+      !usage.resetCredits ||
+      usage.resetCredits.availableCount <= 0
+    ) {
+      return usage;
+    }
+
+    const resetHeaders = new Map(headers);
+    resetHeaders.set("Accept", "application/json");
+    resetHeaders.set("OpenAI-Beta", "codex-1");
+    resetHeaders.set("originator", "Codex Desktop");
+    try {
+      const details = await this.requestJson<ResetCreditsPayload>(
+        RESET_CREDITS_ENDPOINT,
+        resetHeaders,
+      );
+      return {
+        ...usage,
+        resetCredits: mergeResetCreditDetails(
+          usage.resetCredits,
+          parseResetCreditsPayload(details.body),
+        ),
+      };
+    } catch {
+      // Detailed expiry data is optional. Keep the count from /wham/usage.
+      return usage;
+    }
   }
 
   private async requestJson<T>(
@@ -210,6 +279,9 @@ export function parseUsagePayload(
     creditBalance: credits.balance,
     creditLabel: formatCreditLabel(credits.unlimited, credits.balance, credits.hasCredits),
     windows: primaryWindows,
+    resetCredits: parseResetCreditsPayload(
+      payload.rate_limit_reset_credits ?? payload.rateLimitResetCredits,
+    ),
   };
 }
 
@@ -218,18 +290,18 @@ export function formatUsageShortSummary(usage: UsageSnapshot | undefined): strin
     return null;
   }
 
-  const fiveHour = usage.windows.find((window) => window.key === "5h");
-  const weekly = usage.windows.find((window) => window.key === "1w");
   const parts: string[] = [];
 
   if (usage.planType) {
     parts.push(usage.planType);
   }
-  if (fiveHour?.remainingPercent != null) {
-    parts.push(`5h ${fiveHour.remainingPercent}%`);
+  for (const window of usage.windows) {
+    if (window.remainingPercent != null) {
+      parts.push(`${window.label} ${window.remainingPercent}%`);
+    }
   }
-  if (weekly?.remainingPercent != null) {
-    parts.push(`1w ${weekly.remainingPercent}%`);
+  if (usage.resetCredits) {
+    parts.push(`resets ${usage.resetCredits.availableCount}`);
   }
   if (parts.length === 0 && usage.creditLabel) {
     parts.push(usage.creditLabel);
@@ -265,36 +337,29 @@ function pickUsageWindows(
   limitName: string | null,
   referenceTimeSeconds: number,
 ): UsageWindowSummary[] | null {
-  const windows = [
-    normalizeRateWindow(rateLimit?.primary_window, referenceTimeSeconds),
-    normalizeRateWindow(rateLimit?.secondary_window, referenceTimeSeconds),
-  ].filter((window): window is NormalizedRateWindow => window !== null);
+  const windows: NormalizedWindowEntry[] = [];
+  const primaryWindow = normalizeRateWindow(
+    rateLimit?.primary_window,
+    referenceTimeSeconds,
+  );
+  const secondaryWindow = normalizeRateWindow(
+    rateLimit?.secondary_window,
+    referenceTimeSeconds,
+  );
+  if (primaryWindow) {
+    windows.push({ key: "primary", window: primaryWindow });
+  }
+  if (secondaryWindow) {
+    windows.push({ key: "secondary", window: secondaryWindow });
+  }
 
   if (windows.length === 0) {
     return null;
   }
 
-  const fiveHourWindow = pickClosestWindow(
-    windows.filter((window) => window.windowMinutes < MINUTES_IN_DAY),
-    FIVE_HOUR_WINDOW_MINUTES,
+  return windows.map(({ key, window }) =>
+    toWindowSummary(key, formatWindowLabel(window.windowMinutes), limitName, window),
   );
-  const weeklyWindow = pickClosestWindow(
-    windows.filter(
-      (window) =>
-        window !== fiveHourWindow && window.windowMinutes >= MINUTES_IN_DAY,
-    ),
-    WEEKLY_WINDOW_MINUTES,
-  );
-  const output: UsageWindowSummary[] = [];
-
-  if (fiveHourWindow) {
-    output.push(toWindowSummary("5h", "5h", limitName, fiveHourWindow));
-  }
-  if (weeklyWindow) {
-    output.push(toWindowSummary("1w", "1w", limitName, weeklyWindow));
-  }
-
-  return output;
 }
 
 function normalizeRateWindow(
@@ -322,7 +387,7 @@ function normalizeRateWindow(
 }
 
 function toWindowSummary(
-  key: "5h" | "1w",
+  key: string,
   label: string,
   limitName: string | null,
   window: NormalizedRateWindow,
@@ -342,31 +407,79 @@ function toWindowSummary(
   };
 }
 
-function pickClosestWindow(
-  windows: NormalizedRateWindow[],
-  targetWindowMinutes: number,
-): NormalizedRateWindow | null {
-  if (windows.length === 0) {
-    return null;
+function formatWindowLabel(windowMinutes: number): string {
+  const roundedMinutes = Math.round(windowMinutes);
+  if (
+    roundedMinutes >= 28 * 24 * 60 &&
+    roundedMinutes <= 32 * 24 * 60
+  ) {
+    return "1mo";
+  }
+  const weeks = roundedMinutes / (7 * 24 * 60);
+  if (Number.isInteger(weeks)) {
+    return `${weeks}w`;
   }
 
-  return windows.reduce((closestWindow, candidateWindow) => {
-    const closestDistance = Math.abs(
-      closestWindow.windowMinutes - targetWindowMinutes,
-    );
-    const candidateDistance = Math.abs(
-      candidateWindow.windowMinutes - targetWindowMinutes,
-    );
-    if (candidateDistance < closestDistance) {
-      return candidateWindow;
-    }
-    if (candidateDistance > closestDistance) {
-      return closestWindow;
-    }
-    return candidateWindow.windowMinutes > closestWindow.windowMinutes
-      ? candidateWindow
-      : closestWindow;
-  });
+  const days = roundedMinutes / (24 * 60);
+  if (Number.isInteger(days)) {
+    return `${days}d`;
+  }
+
+  const hours = roundedMinutes / 60;
+  if (Number.isInteger(hours)) {
+    return `${hours}h`;
+  }
+
+  return `${roundedMinutes}m`;
+}
+
+export function parseResetCreditsPayload(
+  payload: ResetCreditsPayload | null | undefined,
+): UsageResetCreditsSummary | undefined {
+  if (!payload) {
+    return undefined;
+  }
+
+  const expiresAt = Array.isArray(payload.credits)
+    ? payload.credits
+        .filter((credit) => {
+          const resetType = normalizeString(credit.reset_type ?? credit.resetType);
+          const status = normalizeString(credit.status);
+          return (
+            (!resetType || resetType === "codex_rate_limits") &&
+            (!status || status === "available")
+          );
+        })
+        .map((credit) => normalizeIsoTimestamp(credit.expires_at ?? credit.expiresAt))
+        .filter((value): value is string => value !== null)
+        .sort()
+    : [];
+  const explicitCount = toNullableNumber(
+    payload.available_count ?? payload.availableCount,
+  );
+  if (explicitCount == null && expiresAt.length === 0) {
+    return undefined;
+  }
+
+  return {
+    availableCount: Math.max(0, Math.floor(explicitCount ?? expiresAt.length)),
+    expiresAt,
+    nextExpiresAt: expiresAt[0] ?? null,
+  };
+}
+
+function mergeResetCreditDetails(
+  summary: UsageResetCreditsSummary,
+  details: UsageResetCreditsSummary | undefined,
+): UsageResetCreditsSummary {
+  if (!details) {
+    return summary;
+  }
+  return {
+    availableCount: details.availableCount,
+    expiresAt: details.expiresAt,
+    nextExpiresAt: details.nextExpiresAt,
+  };
 }
 
 function normalizeCredits(credits: CreditsPayload | null | undefined): {

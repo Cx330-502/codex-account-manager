@@ -513,10 +513,12 @@ export class CodexAccountStore {
         return record;
       }
 
+      const nextUsage = preserveResetCreditDetails(record.usage, usage);
+
       return {
         ...record,
         updatedAt: checkedAt,
-        usage,
+        usage: nextUsage,
         usageCheckedAt: checkedAt,
         usageError,
       };
@@ -1119,6 +1121,34 @@ function cloneAuthFile(auth: CodexAuthFile): CodexAuthFile {
   return {
     ...auth,
     tokens: auth.tokens ? { ...auth.tokens } : undefined,
+  };
+}
+
+function preserveResetCreditDetails(
+  previous: UsageSnapshot | undefined,
+  next: UsageSnapshot | undefined,
+): UsageSnapshot | undefined {
+  const previousCredits = previous?.resetCredits;
+  const nextCredits = next?.resetCredits;
+  if (
+    !next ||
+    !previousCredits ||
+    !nextCredits ||
+    (Array.isArray(nextCredits.expiresAt) && nextCredits.expiresAt.length > 0) ||
+    previousCredits.availableCount !== nextCredits.availableCount
+  ) {
+    return next;
+  }
+
+  return {
+    ...next,
+    resetCredits: {
+      ...nextCredits,
+      expiresAt: Array.isArray(previousCredits.expiresAt)
+        ? [...previousCredits.expiresAt]
+        : [],
+      nextExpiresAt: previousCredits.nextExpiresAt,
+    },
   };
 }
 
